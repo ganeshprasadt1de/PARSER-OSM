@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OSM Viewer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --paper: #f7f1e7;
+      --ink: #1f2a2e;
+      --muted: #5d6c72;
+      --panel: rgba(255, 251, 244, 0.92);
+      --line: rgba(31, 42, 46, 0.12);
+      --house: #d46a2f;
+      --street: #2563eb;
+      --admin: #16826f;
+      --shadow: 0 16px 40px rgba(31, 42, 46, 0.14);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      font-family: "Manrope", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(212, 106, 47, 0.12), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(22, 130, 111, 0.12), transparent 30%),
+        var(--paper);
+    }
+
+    #app {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+    }
+
+    aside {
+      padding: 20px;
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.4rem;
+      line-height: 1.2;
+    }
+
+    .lede {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+
+    .card {
+      margin-top: 14px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 10px 0;
+    }
+
+    label { font-size: 0.92rem; }
+
+    .stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--house);
+    }
+
+    input[type="text"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--ink);
+      background: white;
+    }
+
+    button {
+      width: 100%;
+      border: none;
+      border-radius: 8px;
+      padding: 11px 14px;
+      font: inherit;
+      font-weight: 700;
+      color: white;
+      cursor: pointer;
+      background: linear-gradient(135deg, #163c8a, #2563eb);
+    }
+
+    .mono {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px 12px;
+      font-size: 0.9rem;
+    }
+
+    .stats .key { color: var(--muted); }
+    .stats .value { font-family: "JetBrains Mono", monospace; }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 7px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+    }
+
+    .warning {
+      min-height: 1.2em;
+      color: #b45309;
+      font-size: 0.85rem;
+      margin-top: 10px;
+    }
+
+    .value.wrap {
+      text-align: right;
+      max-width: 170px;
+      overflow-wrap: anywhere;
+    }
+
+    .result-list {
+      display: grid;
+      gap: 6px;
+      grid-column: 1 / -1;
+      margin-top: 10px;
+    }
+
+    .result-button {
+      text-align: left;
+      background: #1f2a2e;
+      font-weight: 600;
+      line-height: 1.35;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    @media (max-width: 960px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+      }
+
+      aside {
+        max-height: 42vh;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <h1>OSM Viewer</h1>
+      <p class="lede">This GUI shows the reduced dataset: houses as points, streets as lines, and administrative boundaries as polygons.</p>
+
+      <section class="card">
+        <h2>Viewport Loading</h2>
+        <label for="houseLimit">Maximum houses in the current map window: <span id="houseLimitLabel" class="mono">1500</span></label>
+        <input id="houseLimit" type="range" min="100" max="5000" step="100" value="1500">
+        <div class="row">
+          <label><input id="showStreets" type="checkbox" checked> Show streets</label>
+          <label><input id="showAdmin" type="checkbox" checked> Show admin areas</label>
+        </div>
+        <button id="refreshBtn" type="button">Refresh Map</button>
+        <div id="warning" class="warning"></div>
+      </section>
+
+      <section class="card">
+        <h2>Legend</h2>
+        <div class="legend-item"><span class="swatch" style="background: var(--house)"></span> Houses are stored as one representative point.</div>
+        <div class="legend-item"><span class="swatch" style="background: var(--street)"></span> Streets are stored as line strings from OSM ways.</div>
+        <div class="legend-item"><span class="swatch" style="background: var(--admin)"></span> Admin areas are stored as polygons.</div>
+        <div class="legend-item"><span class="swatch" style="background: #111827"></span> Reverse geocoder result.</div>
+        <div class="legend-item"><span class="swatch" style="background: #064e3b"></span> PIP matched admin areas.</div>
+      </section>
+
+      <section class="card">
+        <h2>Current View</h2>
+        <div id="viewStats" class="stats">
+          <div class="key">Houses shown</div><div id="housesShown" class="value">0</div>
+          <div class="key">Street lines shown</div><div id="streetsShown" class="value">0</div>
+          <div class="key">Admin areas shown</div><div id="areasShown" class="value">0</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Dataset Stats</h2>
+        <div id="datasetStats" class="stats">
+          <div class="key">Loading</div><div class="value">...</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Cursor</h2>
+        <div id="cursor" class="mono">Lat -, Lon -</div>
+      </section>
+
+      <section class="card">
+        <h2>Geocoder</h2>
+        <div class="stack">
+          <input id="geocodeInput" type="text" placeholder="Street number city">
+          <label><input id="useLlmGeocode" type="checkbox"> Use LLM for natural-language query</label>
+          <div class="row">
+            <button id="geocodeBtn" type="button">Search</button>
+            <button id="clearGeocodeBtn" type="button">Clear</button>
+          </div>
+        </div>
+        <div id="geocodeResult" class="stats">
+          <div class="key">Query time</div><div class="value">-</div>
+          <div class="key">Results</div><div class="value">-</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Reverse Geocoder</h2>
+        <div class="stack">
+          <label><input id="reverseEnabled" type="checkbox"> Enable map click lookup</label>
+          <button id="clearReverseBtn" type="button">Clear Result</button>
+        </div>
+        <div id="reverseResult" class="stats">
+          <div class="key">Clicked point</div><div class="value">-</div>
+          <div class="key">Closest house</div><div class="value">-</div>
+        </div>
+      </section>
+    </aside>
+
+    <main id="map"></main>
+  </div>
+
+  <script>
+    const map = L.map("map", { preferCanvas: true }).setView([48.7758, 9.1829], 13);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "Map data (c) OpenStreetMap contributors"
+    }).addTo(map);
+
+    map.createPane("adminPane");
+    map.createPane("streetPane");
+    map.createPane("housePane");
+    map.createPane("pipPane");
+    map.createPane("reversePane");
+    map.createPane("geocodePane");
+    map.getPane("adminPane").style.zIndex = 410;
+    map.getPane("streetPane").style.zIndex = 430;
+    map.getPane("housePane").style.zIndex = 450;
+    map.getPane("pipPane").style.zIndex = 465;
+    map.getPane("reversePane").style.zIndex = 470;
+    map.getPane("geocodePane").style.zIndex = 480;
+
+    const adminLayer = L.layerGroup().addTo(map);
+    const streetsLayer = L.layerGroup().addTo(map);
+    const housesLayer = L.layerGroup().addTo(map);
+    const pipLayer = L.layerGroup().addTo(map);
+    const reverseLayer = L.layerGroup().addTo(map);
+    const geocodeLayer = L.layerGroup().addTo(map);
+    const houseLimitInput = document.getElementById("houseLimit");
+    const houseLimitLabel = document.getElementById("houseLimitLabel");
+    const showStreets = document.getElementById("showStreets");
+    const showAdmin = document.getElementById("showAdmin");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const warningEl = document.getElementById("warning");
+    const housesShownEl = document.getElementById("housesShown");
+    const streetsShownEl = document.getElementById("streetsShown");
+    const areasShownEl = document.getElementById("areasShown");
+    const datasetStatsEl = document.getElementById("datasetStats");
+    const cursorEl = document.getElementById("cursor");
+    const geocodeInput = document.getElementById("geocodeInput");
+    const useLlmGeocode = document.getElementById("useLlmGeocode");
+    const geocodeBtn = document.getElementById("geocodeBtn");
+    const clearGeocodeBtn = document.getElementById("clearGeocodeBtn");
+    const geocodeResultEl = document.getElementById("geocodeResult");
+    const reverseResultEl = document.getElementById("reverseResult");
+    const reverseEnabled = document.getElementById("reverseEnabled");
+    const clearReverseBtn = document.getElementById("clearReverseBtn");
+
+    let refreshTimer = null;
+    let visibleAdminAreas = [];
+    let visibleHouses = [];
+    let visibleStreets = [];
+    let highlightedAdminIds = new Set();
+    let pipRequestId = 0;
+    let viewportRequestId = 0;
+    let viewportAbortController = null;
+
+    function buildViewportQuery() {
+      const bounds = map.getBounds();
+      const query = new URLSearchParams();
+      query.set("minLat", bounds.getSouth().toFixed(8));
+      query.set("maxLat", bounds.getNorth().toFixed(8));
+      query.set("minLon", bounds.getWest().toFixed(8));
+      query.set("maxLon", bounds.getEast().toFixed(8));
+      return query;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function isReverseEnabled() {
+      return reverseEnabled.checked;
+    }
+
+    function openFeaturePopup(event, html, reverseLatLng = event.latlng) {
+      if (event.originalEvent) {
+        L.DomEvent.stop(event.originalEvent);
+      }
+      L.popup()
+        .setLatLng(event.latlng)
+        .setContent(html)
+        .openOn(map);
+      runReverseGeocoder(reverseLatLng);
+    }
+
+    function openInspectPopup(latlng, html) {
+      L.popup()
+        .setLatLng(latlng)
+        .setContent(html)
+        .openOn(map);
+    }
+
+    function runReverseGeocoder(latlng) {
+      if (!isReverseEnabled()) {
+        return;
+      }
+      reverseGeocode(latlng).catch((error) => {
+        setStatsRows(reverseResultEl, [
+          ["Clicked point", `${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)}`],
+          ["Closest house", `Request failed: ${error.message}`, true]
+        ]);
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function replaceLayerContents(layer, drawIntoLayer) {
+      const nextLayer = L.layerGroup();
+      drawIntoLayer(nextLayer);
+      layer.clearLayers();
+      nextLayer.eachLayer((item) => layer.addLayer(item));
+    }
+
+    function drawHouses(houses) {
+      const visibleRadius = map.getZoom() < 13 ? 3 : (map.getZoom() < 16 ? 4 : 5);
+      replaceLayerContents(housesLayer, (targetLayer) => {
+        for (const house of houses) {
+        L.circleMarker([house.lat, house.lon], {
+          pane: "housePane",
+          radius: visibleRadius,
+          weight: 1,
+          color: "#fff7ed",
+          opacity: 0.95,
+          fillOpacity: 0.9,
+          fillColor: "#d46a2f",
+          interactive: false
+        })
+          .addTo(targetLayer);
+        }
+      });
+    }
+
+    function drawStreets(streets) {
+      replaceLayerContents(streetsLayer, (targetLayer) => {
+        for (const street of streets) {
+        if (!Array.isArray(street.geometry) || street.geometry.length < 2) {
+          continue;
+        }
+
+        L.polyline(street.geometry, {
+          pane: "streetPane",
+          color: "#2563eb",
+          weight: 2,
+          opacity: 0.75,
+          interactive: false
+        })
+          .addTo(targetLayer);
+        }
+      });
+    }
+
+    function drawAdminAreas(areas) {
+      replaceLayerContents(adminLayer, (targetLayer) => {
+        for (const area of areas) {
+        if (!Array.isArray(area.geometry) || area.geometry.length < 4) {
+          continue;
+        }
+        const highlighted = highlightedAdminIds.has(Number(area.id));
+        const polygon = L.polygon(area.geometry, {
+          pane: "adminPane",
+          color: highlighted ? "#064e3b" : "#16826f",
+          weight: highlighted ? 4 : 1,
+          fillOpacity: highlighted ? 0.12 : 0.05,
+          interactive: false,
+          bubblingMouseEvents: false
+        });
+        polygon.addTo(targetLayer);
+        }
+      });
+    }
+
+    function setStatsRows(target, rows) {
+      target.innerHTML = "";
+      for (const [key, value, wrap] of rows) {
+        const keyEl = document.createElement("div");
+        keyEl.className = "key";
+        keyEl.textContent = key;
+        const valueEl = document.createElement("div");
+        valueEl.className = wrap ? "value wrap" : "value";
+        valueEl.textContent = String(value);
+        target.appendChild(keyEl);
+        target.appendChild(valueEl);
+      }
+    }
+
+    function savedValue(value) {
+      return value ? value : "(not saved)";
+    }
+
+    function housePopupHtml(house) {
+      const street = escapeHtml(house.street || "(no street saved)");
+      const number = escapeHtml(house.number || "(no house number saved)");
+      const place = escapeHtml([house.postcode, house.city].filter(Boolean).join(" "));
+      const id = escapeHtml(house.id);
+      return `
+        <strong>House / address point</strong><br>
+        Street: ${street}<br>
+        Number: ${number}<br>
+        ${place ? `Place: ${place}<br>` : ""}
+        OSM id: ${id}
+      `;
+    }
+
+    function streetPopupHtml(street) {
+      return `
+        <strong>Street way</strong><br>
+        Name: ${escapeHtml(streetLabel(street))}<br>
+        Highway type: ${escapeHtml(street.highway || "(unknown)")}<br>
+        OSM id: ${escapeHtml(street.id)}
+      `;
+    }
+
+    function adminPopupHtml(area, title = "Administrative area") {
+      return `<strong>${title}</strong><br>Name: ${escapeHtml(area.name)}<br>admin_level=${escapeHtml(area.adminLevel)}<br>OSM id: ${escapeHtml(area.id)}`;
+    }
+
+    function streetLabel(street) {
+      if (!street) {
+        return "(not saved)";
+      }
+      if (street.label) {
+        return street.label;
+      }
+      if (street.name) {
+        return street.name;
+      }
+      return street.highway ? `unnamed ${street.highway} road` : "unnamed road";
+    }
+
+    function layerDistancePx(first, second) {
+      const dx = first.x - second.x;
+      const dy = first.y - second.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function segmentDistancePx(point, start, end) {
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      if (lengthSquared === 0) {
+        return layerDistancePx(point, start);
+      }
+      const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+      return layerDistancePx(point, L.point(start.x + t * dx, start.y + t * dy));
+    }
+
+    function streetDistancePx(latlng, street) {
+      if (!Array.isArray(street.geometry) || street.geometry.length < 2) {
+        return Infinity;
+      }
+      const clickPoint = map.latLngToLayerPoint(latlng);
+      let best = Infinity;
+      for (let index = 1; index < street.geometry.length; index += 1) {
+        const previous = map.latLngToLayerPoint(street.geometry[index - 1]);
+        const current = map.latLngToLayerPoint(street.geometry[index]);
+        best = Math.min(best, segmentDistancePx(clickPoint, previous, current));
+      }
+      return best;
+    }
+
+    function houseDistancePx(latlng, house) {
+      return layerDistancePx(
+        map.latLngToLayerPoint(latlng),
+        map.latLngToLayerPoint([house.lat, house.lon])
+      );
+    }
+
+    function pointInRing(latlng, ring) {
+      const x = latlng.lng;
+      const y = latlng.lat;
+      let inside = false;
+      for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+        const currentPoint = ring[index];
+        const previousPoint = ring[previous];
+        const xi = Number(currentPoint[1]);
+        const yi = Number(currentPoint[0]);
+        const xj = Number(previousPoint[1]);
+        const yj = Number(previousPoint[0]);
+        const crosses = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+        if (crosses) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    }
+
+    function findNearestHouse(latlng) {
+      let best = null;
+      let bestDistance = Infinity;
+      for (const house of visibleHouses) {
+        const distance = houseDistancePx(latlng, house);
+        if (distance < bestDistance) {
+          best = house;
+          bestDistance = distance;
+        }
+      }
+      return { item: best, distance: bestDistance };
+    }
+
+    function findNearestStreet(latlng) {
+      let best = null;
+      let bestDistance = Infinity;
+      for (const street of visibleStreets) {
+        const distance = streetDistancePx(latlng, street);
+        if (distance < bestDistance) {
+          best = street;
+          bestDistance = distance;
+        }
+      }
+      return { item: best, distance: bestDistance };
+    }
+
+    function findContainingAdminArea(latlng) {
+      return visibleAdminAreas
+        .filter((area) => Array.isArray(area.geometry) && area.geometry.length >= 4 && pointInRing(latlng, area.geometry))
+        .sort((left, right) => Number(right.adminLevel || 0) - Number(left.adminLevel || 0))[0] || null;
+    }
+
+    function inspectVisibleFeature(latlng) {
+      const house = findNearestHouse(latlng);
+      const street = findNearestStreet(latlng);
+      if (house.item && house.distance <= 8) {
+        openInspectPopup(latlng, housePopupHtml(house.item));
+        return;
+      }
+      if (street.item && street.distance <= 12) {
+        openInspectPopup(latlng, streetPopupHtml(street.item));
+        return;
+      }
+      if (house.item && house.distance <= 14) {
+        openInspectPopup(latlng, housePopupHtml(house.item));
+        return;
+      }
+      const area = findContainingAdminArea(latlng);
+      if (area) {
+        openInspectPopup(latlng, adminPopupHtml(area));
+      }
+    }
+
+    function drawPipAreas(areas) {
+      pipLayer.clearLayers();
+      for (const area of areas) {
+        if (!Array.isArray(area.geometry) || area.geometry.length < 4) {
+          continue;
+        }
+        const polygon = L.polygon(area.geometry, {
+          pane: "pipPane",
+          color: "#064e3b",
+          weight: 5,
+          fillOpacity: 0.03,
+          interactive: false,
+          bubblingMouseEvents: false
+        });
+        polygon.addTo(pipLayer);
+      }
+    }
+
+    async function refreshPipAreas(adminAreas) {
+      const requestId = ++pipRequestId;
+      pipLayer.clearLayers();
+
+      const areasToDraw = Array.isArray(adminAreas)
+        ? adminAreas
+            .slice()
+            .sort((left, right) => Number(left.adminLevel) - Number(right.adminLevel))
+        : [];
+
+      const geometries = [];
+      for (const area of areasToDraw) {
+        try {
+          const query = new URLSearchParams();
+          if (Number.isInteger(Number(area.index))) {
+            query.set("index", String(area.index));
+          } else {
+            query.set("id", String(area.id));
+          }
+          query.set("maxPoints", "1200");
+          const geometry = await fetchJson(`/api/admin-area?${query.toString()}`);
+          geometries.push(geometry);
+        } catch (error) {
+          console.warn(`Could not load admin area ${area.id ?? area.index}: ${error.message}`);
+        }
+      }
+
+      if (requestId === pipRequestId) {
+        drawPipAreas(geometries);
+      }
+    }
+
+    function drawReverseResult(data) {
+      reverseLayer.clearLayers();
+
+      if (!data || !data.query) {
+        highlightedAdminIds = new Set();
+        drawAdminAreas(visibleAdminAreas);
+        pipRequestId += 1;
+        pipLayer.clearLayers();
+        return;
+      }
+
+      const queryLatLng = [data.query.lat, data.query.lon];
+      L.circleMarker(queryLatLng, {
+        pane: "reversePane",
+        radius: 7,
+        color: "#111827",
+        weight: 2,
+        fillColor: "#ffffff",
+        fillOpacity: 1,
+        interactive: false
+      })
+        .bindPopup("Clicked point")
+        .addTo(reverseLayer);
+
+      const resultType = data.result?.type || "none";
+      if (resultType === "street" && data.street && Array.isArray(data.street.geometry) && data.street.geometry.length >= 2) {
+        L.polyline(data.street.geometry, {
+          pane: "reversePane",
+          color: "#111827",
+          weight: 7,
+          opacity: 0.9,
+          interactive: false
+        })
+          .bindPopup("<strong>Reverse street result</strong><br>" + escapeHtml(streetLabel(data.street)))
+          .addTo(reverseLayer);
+      }
+
+      const adminAreas = Array.isArray(data.adminAreas)
+        ? data.adminAreas
+        : (data.house && Array.isArray(data.house.adminAreas) ? data.house.adminAreas : []);
+      highlightedAdminIds = new Set(
+        adminAreas.map((area) => Number(area.id)).filter(Number.isFinite)
+      );
+      drawAdminAreas(visibleAdminAreas);
+      refreshPipAreas(adminAreas).catch((error) => {
+        console.warn("PIP area request failed: " + error.message);
+      });
+
+      const rows = [
+        ["Clicked point", `${data.query.lat.toFixed(6)}, ${data.query.lon.toFixed(6)}`],
+        ["Result type", data.result?.type || "none"],
+        ["Result", data.result?.label || "No result found", true]
+      ];
+      if (Number.isFinite(Number(data.result?.distanceMeters))) {
+        rows.push(["Result distance", `${Number(data.result.distanceMeters).toFixed(1)} m`]);
+      }
+
+      if (data.house) {
+        const houseLatLng = [data.house.lat, data.house.lon];
+        const label = data.house.addressLine || "(address fields incomplete)";
+        const houseDistance = Number(data.house.distanceMeters ?? data.distanceMeters);
+        if (resultType === "house") {
+          L.polyline([queryLatLng, houseLatLng], {
+            pane: "reversePane",
+            color: "#111827",
+            weight: 2,
+            opacity: 0.8,
+            dashArray: "4 5",
+            interactive: false
+          }).addTo(reverseLayer);
+        }
+        L.circleMarker(houseLatLng, {
+          pane: "reversePane",
+          radius: resultType === "house" ? 8 : 5,
+          color: "#ffffff",
+          weight: resultType === "house" ? 2 : 1,
+          fillColor: "#d46a2f",
+          fillOpacity: resultType === "house" ? 1 : 0.65,
+          interactive: false
+        })
+          .bindPopup("<strong>Closest house</strong><br>" + escapeHtml(label) + "<br>" + houseDistance.toFixed(1) + " m away")
+          .addTo(reverseLayer);
+        rows.push(["Closest house", label, true]);
+        rows.push(["House distance", `${houseDistance.toFixed(1)} m`]);
+        rows.push(["Street", savedValue(data.house.street), true]);
+        rows.push(["House number", savedValue(data.house.number), true]);
+        rows.push(["Postcode", savedValue(data.house.postcode), true]);
+        rows.push(["City", savedValue(data.house.city), true]);
+        rows.push(["Country", savedValue(data.house.country), true]);
+        rows.push(["House OSM id", data.house.id]);
+      } else {
+        rows.push(["Closest house", "No house found"]);
+      }
+
+      if (data.street) {
+        rows.push(["Nearest street", streetLabel(data.street), true]);
+        rows.push(["Street distance", `${Number(data.street.distanceMeters).toFixed(1)} m`]);
+        rows.push(["Street type", savedValue(data.street.highway), true]);
+        rows.push(["Street OSM id", data.street.id]);
+      }
+
+      if (data.adminArea) {
+        rows.push(["Most detailed area", savedValue(data.adminArea.name), true]);
+        rows.push(["Area level", data.adminArea.adminLevel]);
+      }
+
+      const adminNames = adminAreas.map((area) => area.name).filter(Boolean).join(" / ");
+      rows.push(["PIP admin matches", highlightedAdminIds.size]);
+      rows.push(["Admin areas", adminNames || "-", true]);
+      setStatsRows(reverseResultEl, rows);
+    }
+
+    function clearReverseResult() {
+      highlightedAdminIds = new Set();
+      pipRequestId += 1;
+      reverseLayer.clearLayers();
+      pipLayer.clearLayers();
+      drawAdminAreas(visibleAdminAreas);
+      setStatsRows(reverseResultEl, [
+        ["Clicked point", "-"],
+        ["Closest house", "-"]
+      ]);
+    }
+
+    async function reverseGeocode(latlng) {
+      const query = new URLSearchParams();
+      query.set("lat", latlng.lat.toFixed(8));
+      query.set("lon", latlng.lng.toFixed(8));
+      const data = await fetchJson(`/api/reverse?${query.toString()}`);
+      drawReverseResult(data);
+    }
+
+    function geocodeResultLabel(result) {
+      const type = result.type === "admin_area" ? "area" : result.type;
+      return `${type}: ${result.label || "(not saved)"}`;
+    }
+
+    function addGeocodePoint(result, radius, fillColor) {
+      if (!Number.isFinite(Number(result.lat)) || !Number.isFinite(Number(result.lon))) {
+        return null;
+      }
+      return L.circleMarker([result.lat, result.lon], {
+        pane: "geocodePane",
+        radius,
+        color: "#111827",
+        weight: 2,
+        fillColor,
+        fillOpacity: 0.95
+      }).bindPopup(escapeHtml(geocodeResultLabel(result)));
+    }
+
+    async function drawGeocodeResult(data) {
+      geocodeLayer.clearLayers();
+      const results = Array.isArray(data.results) ? data.results : [];
+      const rows = [
+        ["Query time", `${Number(data.queryTimeMs || 0).toFixed(3)} ms`],
+        ["Results", String(results.length)]
+      ];
+      if (data.originSource) {
+        rows.push(["Origin", data.originSource]);
+      }
+      setStatsRows(geocodeResultEl, rows);
+
+      const list = document.createElement("div");
+      list.className = "result-list";
+      const bounds = [];
+
+      for (const result of results) {
+        let layer = null;
+        if (result.type === "house") {
+          layer = addGeocodePoint(result, 8, "#d46a2f");
+        } else if (result.type === "poi") {
+          layer = addGeocodePoint(result, 8, "#7c3aed");
+        } else if (result.type === "street" && result.street && Array.isArray(result.street.geometry) && result.street.geometry.length >= 2) {
+          layer = L.polyline(result.street.geometry, {
+            pane: "geocodePane",
+            color: "#111827",
+            weight: 6,
+            opacity: 0.9
+          }).bindPopup(escapeHtml(geocodeResultLabel(result)));
+        } else if (result.type === "admin_area") {
+          layer = addGeocodePoint(result, 7, "#16826f");
+          if (result.adminArea && Number.isInteger(Number(result.adminArea.index))) {
+            fetchJson(`/api/admin-area?index=${Number(result.adminArea.index)}&maxPoints=1600`)
+              .then((area) => {
+                if (!Array.isArray(area.geometry) || area.geometry.length < 4) {
+                  return;
+                }
+                L.polygon(area.geometry, {
+                  pane: "geocodePane",
+                  color: "#111827",
+                  weight: 3,
+                  fillOpacity: 0.04
+                }).addTo(geocodeLayer);
+              })
+              .catch((error) => console.warn(`Could not load geocoder area: ${error.message}`));
+          }
+        }
+
+        if (layer) {
+          layer.addTo(geocodeLayer);
+          if (typeof layer.getBounds === "function") {
+            const layerBounds = layer.getBounds();
+            bounds.push(layerBounds.getSouthWest(), layerBounds.getNorthEast());
+          } else if (typeof layer.getLatLng === "function") {
+            bounds.push(layer.getLatLng());
+          }
+        }
+
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "result-button";
+        item.textContent = geocodeResultLabel(result);
+        item.addEventListener("click", () => {
+          if (Number.isFinite(Number(result.lat)) && Number.isFinite(Number(result.lon))) {
+            map.setView([result.lat, result.lon], Math.max(map.getZoom(), 15));
+          }
+        });
+        list.appendChild(item);
+      }
+
+      geocodeResultEl.appendChild(list);
+      if (bounds.length > 0) {
+        map.fitBounds(L.latLngBounds(bounds), { maxZoom: 16, padding: [40, 40] });
+      }
+    }
+
+    async function geocodeSearch() {
+      const queryText = geocodeInput.value.trim();
+      if (!queryText) {
+        clearGeocodeResult();
+        return;
+      }
+      setStatsRows(geocodeResultEl, [
+        ["Query time", "loading"],
+        ["Results", "-"]
+      ]);
+      const query = new URLSearchParams();
+      query.set("q", queryText);
+      query.set("limit", "20");
+      const endpoint = useLlmGeocode.checked ? "/api/natural-geocode" : "/api/geocode";
+      if (useLlmGeocode.checked) {
+        query.set("useLlm", "1");
+        const center = map.getCenter();
+        query.set("lat", center.lat.toFixed(8));
+        query.set("lon", center.lng.toFixed(8));
+      }
+      const data = await fetchJson(`${endpoint}?${query.toString()}`);
+      await drawGeocodeResult(data);
+    }
+
+    function clearGeocodeResult() {
+      geocodeLayer.clearLayers();
+      setStatsRows(geocodeResultEl, [
+        ["Query time", "-"],
+        ["Results", "-"]
+      ]);
+    }
+
+    function streetLimitForZoom() {
+      const zoom = map.getZoom();
+      if (zoom < 7) {
+        return "1200";
+      }
+      if (zoom < 9) {
+        return "3000";
+      }
+      if (zoom < 13) {
+        return "7000";
+      }
+      return "16000";
+    }
+
+    function adminLimitForZoom() {
+      const zoom = map.getZoom();
+      if (zoom < 7) {
+        return "40";
+      }
+      if (zoom < 10) {
+        return "100";
+      }
+      return "220";
+    }
+
+    async function refreshViewport() {
+      const requestId = ++viewportRequestId;
+      if (viewportAbortController) {
+        viewportAbortController.abort();
+      }
+      viewportAbortController = new AbortController();
+      const requestOptions = { signal: viewportAbortController.signal };
+      warningEl.textContent = "";
+
+      const houseQuery = buildViewportQuery();
+      houseQuery.set("limit", houseLimitInput.value);
+      const houseRequest = fetchJson(`/api/houses?${houseQuery.toString()}`, requestOptions);
+
+      let streetRequest = Promise.resolve(null);
+      if (showStreets.checked) {
+        const streetQuery = buildViewportQuery();
+        streetQuery.set("limit", streetLimitForZoom());
+        streetRequest = fetchJson(`/api/streets?${streetQuery.toString()}`, requestOptions);
+      }
+
+      let adminRequest = Promise.resolve(null);
+      if (showAdmin.checked) {
+        const adminQuery = buildViewportQuery();
+        adminQuery.set("limit", adminLimitForZoom());
+        adminQuery.set("minLevel", "2");
+        adminQuery.set("maxLevel", "12");
+        adminQuery.set("maxPoints", "400");
+        adminRequest = fetchJson(`/api/admin?${adminQuery.toString()}`, requestOptions);
+      }
+
+      const [houseData, streetData, adminData] = await Promise.all([houseRequest, streetRequest, adminRequest]);
+      if (requestId !== viewportRequestId) {
+        return;
+      }
+
+      const warnings = [];
+      visibleHouses = houseData.houses || [];
+      drawHouses(visibleHouses);
+      housesShownEl.textContent = String(houseData.count || 0);
+      if (houseData.truncated) {
+        warnings.push("House list was truncated. Zoom in for more detail.");
+      }
+
+      if (showStreets.checked && streetData) {
+        visibleStreets = streetData.streets || [];
+        drawStreets(visibleStreets);
+        streetsShownEl.textContent = String(streetData.count || 0);
+        if (streetData.truncated) {
+          warnings.push("Street list was truncated. Zoom in for more detail.");
+        }
+      } else {
+        visibleStreets = [];
+        streetsLayer.clearLayers();
+        streetsShownEl.textContent = "0";
+      }
+
+      if (showAdmin.checked && adminData) {
+        visibleAdminAreas = adminData.areas || [];
+        drawAdminAreas(visibleAdminAreas);
+        areasShownEl.textContent = String(adminData.count || 0);
+      } else {
+        visibleAdminAreas = [];
+        adminLayer.clearLayers();
+        areasShownEl.textContent = "0";
+      }
+
+      warningEl.textContent = warnings.join(" ");
+    }
+
+    async function refreshDatasetStats() {
+      const stats = await fetchJson("/api/stats");
+      const totalSeconds = Number(stats.timings?.totalSeconds || 0);
+      const totalMinutes = Math.floor(totalSeconds / 60);
+      const remainingSeconds = Math.floor(totalSeconds) % 60;
+      const rows = [
+        ["Houses stored", stats.houses],
+        ["Houses from relations", stats.housesFromRelations],
+        ["Houses missing street", stats.housesMissingStreet],
+        ["Houses missing number", stats.housesMissingNumber],
+        ["Street records", stats.streets],
+        ["POIs stored", stats.pois],
+        ["Admin areas", stats.adminAreas],
+        ["Total time", `${totalSeconds.toFixed(3)} s (${totalMinutes} min ${remainingSeconds} s)`],
+        ["Compact dataset (MB)", `${Number(stats.memory?.datasetMB || 0).toFixed(2)} MB`]
+      ];
+
+      setStatsRows(datasetStatsEl, rows);
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+      refreshTimer = setTimeout(() => {
+        refreshViewport().catch((error) => {
+          if (error.name === "AbortError") {
+            return;
+          }
+          warningEl.textContent = `Request failed: ${error.message}`;
+        });
+      }, 200);
+    }
+
+    houseLimitInput.addEventListener("input", () => {
+      houseLimitLabel.textContent = houseLimitInput.value;
+      scheduleRefresh();
+    });
+
+    refreshBtn.addEventListener("click", scheduleRefresh);
+    showStreets.addEventListener("change", scheduleRefresh);
+    showAdmin.addEventListener("change", scheduleRefresh);
+    geocodeBtn.addEventListener("click", () => {
+      geocodeSearch().catch((error) => {
+        setStatsRows(geocodeResultEl, [
+          ["Query time", "-"],
+          ["Results", `Request failed: ${error.message}`, true]
+        ]);
+      });
+    });
+    geocodeInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        geocodeBtn.click();
+      }
+    });
+    clearGeocodeBtn.addEventListener("click", clearGeocodeResult);
+    reverseEnabled.addEventListener("change", () => {
+      if (!isReverseEnabled()) {
+        clearReverseResult();
+      }
+      map.closePopup();
+      if (map.dragging) {
+        map.dragging.disable();
+        map.dragging.enable();
+      }
+      scheduleRefresh();
+    });
+    clearReverseBtn.addEventListener("click", clearReverseResult);
+    map.on("moveend", scheduleRefresh);
+    map.on("zoomend", scheduleRefresh);
+    map.on("mousemove", (event) => {
+      cursorEl.textContent = `Lat ${event.latlng.lat.toFixed(6)}, Lon ${event.latlng.lng.toFixed(6)}`;
+    });
+    map.on("click", (event) => {
+      if (isReverseEnabled()) {
+        runReverseGeocoder(event.latlng);
+      } else {
+        inspectVisibleFeature(event.latlng);
+      }
+    });
+
+    refreshDatasetStats().catch(() => {
+      datasetStatsEl.innerHTML = "<div class='key'>Error</div><div class='value'>Could not load stats</div>";
+    });
+    scheduleRefresh();
+  </script>
+</body>
+</html>

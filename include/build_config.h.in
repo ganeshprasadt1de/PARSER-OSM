@@ -1,0 +1,3 @@
+#pragma once
+
+#define OSM_FRONTEND_INDEX_PATH R"cmake(@CMAKE_CURRENT_LIST_DIR@/frontend/index.html)cmake"
