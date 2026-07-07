@@ -1,43 +1,351 @@
-# OSM Extraction And Viewer
+# OSM Geocoder
 
-This project turns a large OpenStreetMap `.osm.pbf` file into a smaller dataset that is easier to inspect and use later. The parser extracts houses, streets, and administrative areas, stores them in compact memory structures, and shows them in a Leaflet map through a C++ server.
+This project is a local OpenStreetMap parser, geocoder, and browser map.
 
-The `--connect-streets` mode can join street segments when they have the same street identity and touch each other.
+It reads an `.osm.pbf` file, keeps the OSM objects that are useful for the map and geocoder, writes a compact binary snapshot, and serves a Leaflet GUI through a local C++ HTTP server.
 
-The full illustrated explanation is available in `docs/osm_program_explained.pdf`. It explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, and binary snapshot format.
+The program does not use Google, Nominatim, Overpass, PostGIS, SQLite, or an online geocoding API. Geocoding results come from the loaded PBF-derived dataset. The browser map can still request normal OpenStreetMap background tiles from the internet, because the tile layer is only the visual background.
 
-## 1. What The Parser Extracts
+The illustrated project explanation is included here:
+
+```text
+docs/osm_program_explained.pdf
+```
+
+That PDF explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, binary snapshot format, and memory layout with diagrams.
+
+## Index
+
+1. [What You Need To Download](#1-what-you-need-to-download)
+2. [Recommended Folder Layout](#2-recommended-folder-layout)
+3. [Install Build Requirements On Ubuntu 22.04](#3-install-build-requirements-on-ubuntu-2204)
+4. [Install Ollama For Natural-Language Search](#4-install-ollama-for-natural-language-search)
+5. [Build The Program](#5-build-the-program)
+6. [Parse A PBF Into A Binary Snapshot](#6-parse-a-pbf-into-a-binary-snapshot)
+7. [Start The Browser Server](#7-start-the-browser-server)
+8. [Quick API Checks](#8-quick-api-checks)
+9. [What The Program Extracts](#9-what-the-program-extracts)
+10. [Houses And Address Points](#10-houses-and-address-points)
+11. [Streets And Street Connection](#11-streets-and-street-connection)
+12. [Administrative Areas And Holes](#12-administrative-areas-and-holes)
+13. [POIs](#13-pois)
+14. [Reverse Geocoder](#14-reverse-geocoder)
+15. [Forward Geocoder](#15-forward-geocoder)
+16. [Substring And Fuzzy Search](#16-substring-and-fuzzy-search)
+17. [Natural-Language Search With Ollama](#17-natural-language-search-with-ollama)
+18. [Local Knowledge Graph](#18-local-knowledge-graph)
+19. [Ranking](#19-ranking)
+20. [Binary Snapshot Format](#20-binary-snapshot-format)
+21. [Memory And Performance Design](#21-memory-and-performance-design)
+22. [GUI Features](#22-gui-features)
+23. [HTTP API Endpoints](#23-http-api-endpoints)
+24. [Command Line Options](#24-command-line-options)
+25. [Ollama Environment Variables](#25-ollama-environment-variables)
+26. [Console Progress And Metrics](#26-console-progress-and-metrics)
+27. [GeoJSON Export](#27-geojson-export)
+28. [Main Source Files](#28-main-source-files)
+29. [Troubleshooting](#29-troubleshooting)
+30. [Quick Command Template](#30-quick-command-template)
+
+## 1. What You Need To Download
+
+You need three things:
+
+1. This repository.
+2. One OpenStreetMap `.osm.pbf` extract.
+3. Ollama plus one local model, only if you want natural-language LLM search.
+
+### 1.1 Repository
+
+Clone the repository:
+
+```bash
+git clone <repository-url>
+cd PARSER-OSM
+```
+
+Replace `<repository-url>` with the GitHub URL shown by the green `Code` button on the repository page.
+
+If you already have the repository:
+
+```bash
+cd /path/to/PARSER-OSM
+git pull origin main
+```
+
+### 1.2 PBF File
+
+Download an OpenStreetMap `.osm.pbf` extract. The normal source is the Geofabrik download server:
+
+- Baden-Wuerttemberg page: `https://download.geofabrik.de/europe/germany/baden-wuerttemberg.html`
+- Europe PBF path: `https://download.geofabrik.de/europe-latest.osm.pbf`
+- Baden-Wuerttemberg PBF path: `https://download.geofabrik.de/europe/germany/baden-wuerttemberg-latest.osm.pbf`
+
+For a first run, use Baden-Wuerttemberg. Europe is much larger and takes longer to parse.
+
+Example:
+
+```bash
+cd /path/to/osm-task1
+wget https://download.geofabrik.de/europe/germany/baden-wuerttemberg-latest.osm.pbf
+```
+
+Europe example:
+
+```bash
+cd /path/to/osm-task1
+wget https://download.geofabrik.de/europe-latest.osm.pbf
+```
+
+The `.osm.pbf` files are input data. They are not stored in the Git repository because they are large.
+
+### 1.3 Ollama Model
+
+The natural-language mode is designed around a small local Ollama model. The tested model name is:
+
+```text
+qwen2.5:3b
+```
+
+The deterministic forward geocoder and reverse geocoder do not need Ollama. Ollama is only needed when the GUI checkbox `Use LLM for natural-language query` is enabled or when `/api/natural-geocode?useLlm=1` is used.
+
+## 2. Recommended Folder Layout
+
+On Ubuntu 22.04 or WSL Ubuntu 22.04, the examples below use this layout:
+
+```text
+/path/to/osm-task1                 repository
+/path/to/osm-task1-build           CMake build folder
+/path/to/output/baden-geocoder.bin        Baden-Wuerttemberg binary snapshot
+/path/to/output/europe-geocoder.bin       Europe binary snapshot
+```
+
+You can use different paths. If you do, replace the paths in the commands.
+
+If you keep a Windows copy, a generic path looks like this:
+
+```text
+C:\path\to\osm-task1
+```
+
+Run parsing and server commands from Ubuntu/WSL for best performance. Avoid parsing through `/mnt/c/...` when possible, because WSL file access through the Windows mount can be slower. Keeping the repository and PBF inside the Linux filesystem, for example under `$HOME/...`, is usually faster.
+
+## 3. Install Build Requirements On Ubuntu 22.04
+
+Install the compiler, CMake, Ninja, and the native libraries used by libosmium:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake ninja-build zlib1g-dev libbz2-dev libexpat1-dev wget curl
+```
+
+What these packages do:
+
+- `build-essential`: C++ compiler and basic build tools.
+- `cmake`: creates the build files.
+- `ninja-build`: runs the build.
+- `zlib1g-dev`: zlib compression support for reading OSM files.
+- `libbz2-dev`: bzip2 compression support used by libosmium.
+- `libexpat1-dev`: XML parser library used by libosmium.
+- `wget` and `curl`: download PBF files and install Ollama.
+
+The repository already includes these header-only dependencies:
+
+```text
+third_party/cpp-httplib/httplib.h
+third_party/libosmium/include
+third_party/protozero/include
+```
+
+That means you normally do not install `cpp-httplib`, `libosmium`, or `protozero` globally.
+
+## 4. Install Ollama For Natural-Language Search
+
+Ollama is optional for normal deterministic search, but required for LLM natural-language search.
+
+Install Ollama on Ubuntu:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Install the tested local model:
+
+```bash
+ollama pull qwen2.5:3b
+```
+
+Check that Ollama is available:
+
+```bash
+ollama --version
+```
+
+Check that the model is installed:
+
+```bash
+ollama list
+```
+
+The OSM server can start Ollama automatically when the server starts. If another Ollama server is already running on the configured port, the OSM server uses that existing Ollama process and does not stop it on shutdown.
+
+The frontend also has a `Start Ollama Service` button under the geocoder. It calls the backend endpoint `/api/ollama/start`, clears the configured local Ollama port, starts `ollama serve`, warms the model, and reports the status in the browser.
+
+## 5. Build The Program
+
+From the repository folder:
+
+```bash
+cd /path/to/osm-task1
+cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build /path/to/osm-task1-build
+```
+
+The executable will be:
+
+```text
+/path/to/osm-task1-build/osm_parser
+```
+
+If CMake cannot find bundled libosmium or protozero, give the include paths explicitly:
+
+```bash
+cd /path/to/osm-task1
+rm -rf /path/to/osm-task1-build
+cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLIBOSMIUM_INCLUDE_DIR="$PWD/third_party/libosmium/include" \
+  -DPROTOZERO_INCLUDE_DIR="$PWD/third_party/protozero/include"
+cmake --build /path/to/osm-task1-build
+```
+
+## 6. Parse A PBF Into A Binary Snapshot
+
+Parsing reads the `.osm.pbf`, extracts the reduced dataset, builds the forward-geocoder index, and writes one binary snapshot.
+
+### 6.1 Baden-Wuerttemberg
+
+Use this for correctness checks and normal development:
+
+```bash
+cd /path/to/osm-task1
+/path/to/osm-task1-build/osm_parser \
+  --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
+  --low-memory \
+  --connect-streets \
+  --save-binary /path/to/output/baden-geocoder.bin \
+  --pbf-threads 8
+```
+
+### 6.2 Europe
+
+Europe is much larger. Use `--low-memory` on normal laptop hardware:
+
+```bash
+cd /path/to/osm-task1
+/path/to/osm-task1-build/osm_parser \
+  --parse /path/to/data/europe-latest.osm.pbf \
+  --low-memory \
+  --connect-streets \
+  --save-binary /path/to/output/europe-geocoder.bin \
+  --pbf-threads 24
+```
+
+If your machine has less available RAM or starts swapping heavily, lower the thread count:
+
+```bash
+--pbf-threads 8
+```
+
+The parser prints phase progress, elapsed time, throughput, ETA where possible, and memory statistics. On a real terminal, progress updates in place on one line.
+
+## 7. Start The Browser Server
+
+Start the server from a binary snapshot:
+
+```bash
+cd /path/to/osm-task1
+OSM_OLLAMA_MODEL=qwen2.5:3b \
+OSM_OLLAMA_HOST=127.0.0.1 \
+OSM_OLLAMA_TIMEOUT_SECONDS=30 \
+/path/to/osm-task1-build/osm_parser \
+  --load-binary /path/to/output/europe-geocoder.bin \
+  --server 8080
+```
+
+Open:
+
+```text
+http://localhost:8080
+```
+
+To run without automatic Ollama startup:
+
+```bash
+cd /path/to/osm-task1
+OSM_AUTO_OLLAMA=0 \
+/path/to/osm-task1-build/osm_parser \
+  --load-binary /path/to/output/europe-geocoder.bin \
+  --server 8080
+```
+
+Stop the server with `Ctrl+C`. If the OSM server started Ollama itself, it stops that managed Ollama process during shutdown. If Ollama was already running before the OSM server started, the OSM server leaves it running.
+
+## 8. Quick API Checks
+
+Run these in another Ubuntu terminal while the server is running.
+
+Server stats:
+
+```bash
+curl "http://127.0.0.1:8080/api/stats"
+```
+
+Deterministic forward geocoder:
+
+```bash
+curl "http://127.0.0.1:8080/api/geocode?q=Berlin&limit=3"
+```
+
+Reverse geocoder:
+
+```bash
+curl "http://127.0.0.1:8080/api/reverse?lat=48.7758&lon=9.1829"
+```
+
+LLM natural-language geocoder with viewport origin:
+
+```bash
+curl "http://127.0.0.1:8080/api/natural-geocode?q=Where%20can%20I%20buy%20milk%3F&useLlm=1&lat=48.7758&lon=9.1829&limit=3"
+```
+
+The last query has no explicit city or address, so the backend can use the supplied `lat` and `lon` as the viewport origin. The response reports this through `originSource`.
+
+## 9. What The Program Extracts
 
 The parser reads the three main OSM primitive types:
 
-- `node`: one point with latitude and longitude.
-- `way`: an ordered list of node IDs. A way can describe a street, building, or boundary.
-- `relation`: a group of OSM objects. Administrative boundaries and some multipolygon buildings are often stored as relations.
+- `node`: one coordinate with tags.
+- `way`: an ordered list of node IDs plus tags.
+- `relation`: a group of nodes, ways, or other relations with member roles.
 
 The reduced dataset stores:
 
-- houses as representative points
+- houses and address objects as representative points
 - streets as line strings
-- administrative areas as polygons
+- administrative areas as polygons with outer and inner rings
+- selected POIs as searchable points
+- compact string references
+- geometry coordinate arrays
+- admin links for houses, streets, POIs, and admin parents
+- an embedded forward-geocoder index
+
+The parser skips OSM metadata that is not needed for this program, such as version, user ID, timestamp, and changeset. It does not store the full OSM database.
 
 Only one metadata language is selected at a time. The default language is `de`.
 
-## 2. Houses
+## 10. Houses And Address Points
 
-The parser stores houses as points. This is useful for later reverse geocoding because one point is much cheaper to test against polygons than a full building shape.
-
-Address nodes already contain one coordinate, so the parser stores that coordinate directly. A stored address can come from an address node, an addressed building way, or an addressed building relation.
-
-Addressed building ways are reduced to one point:
-
-- closed building polygon: polygon centroid (the geometric center of the polygon)
-- incomplete or non-closed geometry: average of the available vertices
-
-Addressed building relations are kept too. For multipolygon buildings, the parser assembles the outer member ways and stores one representative point, so relation buildings with inner holes are not skipped.
-
-A hole means an empty area inside a polygon. A simple example is a building shaped like a ring around a courtyard. The outside ring is the building boundary, and the courtyard is the inner hole. This project stores one house point for the addressed building relation. It does not draw the full building footprint or the courtyard shape, because the house layer stores points instead of building polygons.
-
-Administrative area holes are handled during point-in-polygon lookup. If a house point is inside the outer boundary but also inside an inner hole, that house is not treated as being inside that administrative area.
+In this program, a house means an address object. It can be a real building, an address node, or an addressed building relation.
 
 Stored address fields:
 
@@ -47,15 +355,19 @@ Stored address fields:
 - `addr:city`
 - `addr:country`
 
-The parser keeps houses even when the street or house number is missing. They are weaker for exact address lookup, but they are still useful for reverse geocoding, checking where address data is incomplete, and later enrichment.
+Address sources:
 
-The map background may show many grey building footprints. Those come from the OpenStreetMap tile layer. A building is stored by this parser only when it has useful address tags.
+- address nodes: stored directly as one point
+- addressed building ways: reduced to one representative point
+- addressed building relations: assembled from member ways and reduced to one representative point
 
-## 3. Streets
+For closed building ways, the representative point is the polygon centroid. For incomplete geometry, the parser uses the average of available vertices.
 
-The parser stores street ways as line strings.
+The parser keeps incomplete address records when at least one useful address tag exists. A house with only `addr:street` or only `addr:housenumber` is still stored. These weaker records are useful for map display, reverse geocoding, and data quality statistics.
 
-An OSM street way stores node IDs, not coordinates. The parser resolves those node IDs to coordinates and writes the final street geometry as a coordinate sequence.
+## 11. Streets And Street Connection
+
+The parser stores street ways as coordinate line strings.
 
 Street identity is taken from the first available value:
 
@@ -63,433 +375,347 @@ Street identity is taken from the first available value:
 2. `official_name`
 3. `ref`
 
-The `ref` fallback matters for larger roads. Roads such as `A 5`, `B 35`, `L 558`, or `51` are often identified by `ref=*` instead of `name=*`.
+The `ref` fallback matters for roads such as `A 5`, `B 35`, or `L 558`.
 
-Area-like highway objects are skipped because a plaza polygon is not a street centerline. The parser also skips highway types that are not useful for this dataset, such as `path`, `footway`, `cycleway`, `steps`, `platform`, and `corridor`.
+The parser skips area-like highway objects because a plaza polygon is not a street centerline. It also skips highway types that are not useful for the displayed street layer, such as footways, cycleways, steps, platforms, corridors, proposed roads, and construction roads.
 
-Some unnamed road pieces are kept when they help visible street continuity. This includes short unnamed connector roads such as `motorway_link`, `trunk_link`, `primary_link`, `secondary_link`, `tertiary_link`, `residential`, `unclassified`, `living_street`, `road`, and unnamed roundabouts that touch named streets. These pieces are stored with an empty name because the OSM object itself has no safe street label.
+Some unnamed connector roads are kept when they help visible street continuity. This includes selected link roads, residential connectors, unclassified roads, living streets, roads, and unnamed roundabouts that touch named streets.
 
-The parser still does not keep every possible road-like object. It skips things such as foot paths, cycle paths, construction roads, proposed roads, and area polygons. Named `track` ways can still be stored, but unnamed tracks are not part of the recovery rule.
-
-## 4. Street Connection
-
-OSM often stores one real street as many separate ways. A street can be split at intersections, bridges, turn restrictions, surface changes, or administrative borders.
-
-The connection step can be run with:
-
-```bash
---connect-streets
-```
-
-The merge rule is conservative:
+`--connect-streets` merges street segments only when the match is conservative:
 
 - same street label
 - same highway type
 - endpoints touch exactly
-- branches are kept as separate chains instead of being forced into one artificial line
+- branches stay separate instead of being forced into one artificial line
 
-The connection step works on the reduced street dataset. It creates endpoint records, sorts them by street label, highway type, and coordinate, then uses connected components (groups of objects linked by shared endpoints) to merge street chains.
+The connection step builds endpoint records, sorts them by identity and coordinate, finds connected components, and writes merged street chains.
 
-Unnamed recovered roads are displayed, but they are not merged by name because they do not have a safe identity.
+## 12. Administrative Areas And Holes
 
-Example while parsing:
-
-```bash
-./build-linux/osm_parser \
-  --parse europe-latest.osm.pbf \
-  --low-memory \
-  --connect-streets \
-  --save-binary europe_connected.bin \
-  --pbf-threads 24
-```
-
-Example using an existing binary snapshot:
-
-```bash
-./build-linux/osm_parser \
-  --load-binary europe_reduced.bin \
-  --connect-streets \
-  --save-binary europe_connected.bin
-```
-
-The parse command can extract the data, connect streets, and write the final connected snapshot in one run. The binary route is useful when an unconnected snapshot already exists and only the street connection step needs to be repeated.
-
-## 5. Incomplete Address Records
-
-OpenStreetMap address data is not always complete. Some houses have a street name but no house number. Other houses have a house number but no street name. The parser keeps both cases instead of throwing them away.
-
-A node, building way, or addressed building relation is stored as a house when it has at least one of these tags:
-
-- `addr:housenumber`
-- `addr:street`
-
-This means these records are still saved:
-
-- a house with only `addr:street`
-- a house with only `addr:housenumber`
-
-The parser counts the missing parts separately:
-
-- `Houses missing street`: stored houses without `addr:street`
-- `Houses missing number`: stored houses without `addr:housenumber`
-
-Keeping these incomplete houses is useful because the point on the map is still valuable:
-
-- If a user clicks near that house, reverse geocoding can still use the house point to improve the result.
-- The missing-count numbers show how much address data is incomplete. For example, a high `Houses missing street` value means many stored houses still need street names.
-- A later step can try to fill missing values. For example, a house with a number but no street name can be matched to the nearest suitable street line.
-
-If these records were skipped during extraction, that information would be lost and could not be improved later.
-
-## 6. Administrative Areas
-
-The parser stores administrative boundaries as polygons. These polygons are later used to link stored houses, streets, and smaller administrative areas to the larger areas around them.
-
-Supported sources:
+Administrative areas are stored from:
 
 - closed administrative boundary ways
-- administrative boundary relations made from outer and inner member ways
+- administrative boundary relations
 
 Admin levels `2` to `12` are kept.
 
-Approximate meaning of common levels:
+Common meanings:
 
 - `2`: country
 - `4`: state or large region
 - `6`: district or county
 - `8`: municipality, city, or town
-- `9` to `12`: local areas such as suburbs, quarters, or neighborhoods
+- `9` to `12`: suburb, quarter, neighborhood, or smaller local area
 
-After these polygons are built, the parser can attach administrative area references to stored houses, streets, and administrative areas.
+Relation geometry stores both outer and inner rings. Inner rings are holes. During point-in-polygon lookup, a point is inside an admin area only when it is inside at least one outer ring and not inside an inner ring for the same area.
 
-## 7. Administrative Area Lookup
+Admin lookup links:
 
-Houses, streets, and administrative areas store references to the administrative areas around them. This makes the data more useful later because the backend can return an address, the street it belongs to, and the surrounding city, district, state, or country.
+- houses to containing admin areas
+- streets to admin areas touched by street geometry points
+- POIs to containing admin areas
+- smaller admin areas to larger parent admin areas
 
-The lookup runs after administrative boundary assembly:
+The polygon test uses bounding boxes, grid pruning, latitude edge indexing, and a local longitude scaling by `cos(latitude)`. This keeps checks faster and avoids treating longitude as a flat distance everywhere.
 
-1. the parser builds a grid over administrative area bounding boxes
-2. each house point checks only the admin areas that overlap its grid cell
-3. each street checks the admin areas for its stored geometry points, so a street crossing a border can keep more than one area
-4. each administrative area uses one representative interior point to find larger parent areas with lower admin level numbers
-5. a point-in-polygon test confirms whether each checked point is really inside the polygon
-6. matching admin area indexes are stored as compact integer links
+## 13. POIs
 
-The representative interior point in step 4 is an important speed improvement. To find the parent of an area, the parser does not need to test many points around that area's boundary. For example, to know that Stuttgart belongs to Baden-Wuerttemberg, one reliable point inside Stuttgart is enough. Testing one interior point gives the needed parent link and avoids repeating the same point-in-polygon work for many boundary points.
+POIs are selected searchable map objects. They are used by deterministic place search and by natural-language product/service queries.
 
-This is not machine learning. It is a geometry shortcut: use one good point that represents the smaller polygon when the question is only "which larger polygon contains this smaller polygon?" Houses are already points, so they are checked directly. Streets are still checked by their geometry points because a street can cross from one area into another.
+The POI index can use fields such as:
 
-The point-in-polygon test does not treat latitude and longitude as plain flat `x/y` coordinates. For each checked point, longitude is scaled by `cos(latitude)` before the ray-crossing test. This is a local equirectangular projection. It is still simple, but it avoids the worst mistake of using raw longitude as if the Earth were flat everywhere.
+- `name`
+- `brand`
+- `operator`
+- `shop`
+- `amenity`
+- `craft`
+- `office`
+- `tourism`
+- `leisure`
 
-The polygon test also uses a latitude edge index. For a checked point, the parser checks only polygon edges near that latitude instead of scanning every edge of every candidate boundary. Inner holes are tested too, so a point inside a hole is excluded from that administrative area.
+Final POI results always come from the loaded PBF-derived dataset. The program does not create fake shops or fake coordinates.
 
-## 8. Reverse Geocoder
+## 14. Reverse Geocoder
 
-The reverse geocoder answers this question: "What useful map object is closest to this clicked map point?"
+The reverse geocoder answers:
 
-When the server starts, it builds grids over stored house points, street bounding boxes, and administrative area bounding boxes. A map click sends the clicked latitude and longitude to:
+```text
+What useful stored object is closest to this clicked coordinate?
+```
+
+Endpoint:
 
 ```text
 /api/reverse?lat=<latitude>&lon=<longitude>
 ```
 
-The backend searches nearby grid cells. It does not scan the full arrays for every click.
+The server builds runtime spatial grids over houses, streets, and administrative areas. A click checks nearby grid cells instead of scanning all objects.
 
-The best result is selected in this order:
+Selection order:
 
-1. a direct house click, when an address point is within about 3 m
-2. a direct street click, when a street line is within about 15 m
-3. a close street, when it is within about 50 m and closer than the nearest house
-4. a close house, when an address point is within about 100 m
-5. a fallback house, when an address point is still reasonably near, up to about 300 m
-6. the containing administrative area, when there is no close house or street
-7. the nearest administrative boundary, when the click is outside all stored areas but still near the dataset
+1. direct house click near an address point
+2. direct street click near a street line
+3. close street
+4. close house
+5. fallback nearby house
+6. containing administrative area
+7. nearest administrative boundary when outside all stored areas
 
-The distance to a street or administrative boundary is approximated by measuring from the clicked point to the nearest line segment of the stored geometry. This is simple, but it is much better than comparing only to one endpoint or one center point.
+The response can include:
 
-The response includes:
+- clicked coordinate
+- best result type
+- closest house
+- nearest street
+- address fields
+- matched administrative areas
+- distances
+- query time
 
-- the clicked coordinate
-- a result object with type `house`, `street`, or `admin_area`
-- the closest stored house point, when one exists
-- the nearest stored street line, when one exists nearby
-- saved address fields such as street, house number, postcode, city, and country
-- administrative areas for the matched house or street, or for the clicked point when no nearby object is selected
-
-When map click lookup is enabled in the GUI, the frontend shows the clicked point, the best result, the closest house address, nearest street details, and the administrative polygons used for the result.
-
-## 9. Forward Geocoder
+## 15. Forward Geocoder
 
 The forward geocoder answers text queries such as:
 
 ```text
 Hauptstrasse 10 Aalen
+Stuttgart
+Kaistrasse 5 Kiel
+Burger King Stuttgart
 ```
 
-The backend uses a forward-geocoder index stored inside the binary snapshot. When a PBF is parsed and saved, the parser builds this index once and writes it together with the reduced dataset. When the server later loads the binary snapshot, it reuses the embedded index instead of rebuilding the forward geocoder from scratch.
-
-- address records from stored houses
-- named streets
-- administrative areas
-
-Administrative area names are also attached to houses and streets in the search index. This allows a query with both an object name and a place name, for example a street and city, to be answered without scanning every object at query time.
-
-The saved forward-geocoder data contains two search indexes:
-
-- a context index, where houses and streets also receive surrounding administrative names for full address queries
-- a primary-field index, where single plain-name queries use the object's own address/name fields first
-
-The primary-field index prevents a one-word city query such as `Stuttgart` from first collecting every house located in Stuttgart. Full address queries still use the context index, because city and district tokens are useful there.
-
-String preprocessing is intentionally simple and deterministic:
-
-- case is ignored
-- punctuation is treated as spacing
-- `Straße`, `Strasse`, and `Str.` are normalized to the same token
-- common German umlauts are normalized, for example `ä` to `ae`
-- combining accent marks are ignored
-
-The query endpoint is:
+Endpoint:
 
 ```text
 /api/geocode?q=<query>&limit=<n>
 ```
 
-The response contains a result list, `queryTimeMs`, `indexMode`, and candidate counters. Results can be houses, streets, administrative areas, or selected POIs. Street results include their line geometry, house results include the address point, POI results include category/tag metadata, and administrative area results include enough information for the frontend to fetch the polygon if needed.
+The forward-geocoder index is built during PBF parsing and saved inside the binary snapshot. Loading the snapshot does not rebuild the forward index from scratch.
 
-The ranking is heuristic:
+The index contains:
 
-- all query tokens must match
-- house results are preferred when the query contains a house number
-- street results are preferred for street-name queries without a house number
-- administrative areas are returned when the area name itself matches
-- for single-token queries, area or street matches must come from the object's own name, not only from a surrounding region
+- house address records
+- street records
+- administrative area records
+- selected POI records
 
-Substring search and typo-tolerant fuzzy fallback are implemented for normalized search tokens. Selected Task 5 POI/natural queries are implemented through `/api/natural-geocode`: named POI in place, such as `Stuttgart Burger King`, nearest category to address, such as `Closest Park to Koenigstrasse 1 Stuttgart`, and product/service concept queries, such as `where can I buy nail polish remover near Koenigstrasse 1 Stuttgart`. The frontend exposes an optional checkbox for local Ollama intent parsing. When the checkbox is enabled, Ollama drafts and verifies strict JSON intent first. The backend then validates that intent, applies small deterministic corrections for known schema variants, obvious brand spellings such as `McDonalds`, `H&M`, and `C&A`, and clear category/product phrases such as `burger`, `Pommes`, or `print documents`. It does not keep a large brand table. Brand and chain queries are validated by searching the local PBF-derived POI index fields such as name, brand, operator, shop, amenity, craft, office, and tourism. Final results still come only from the PBF-derived indexes.
+Two posting indexes are stored:
 
-Product/service queries use a small local concept graph plus product families. Ollama first drafts strict intent JSON, then verifies and corrects that JSON in two local verification passes before the backend uses the final intent. The backend validates the final concept and product family, applies deterministic product-family corrections for known terms, and maps the family to weighted OSM tags such as `amenity=pharmacy`, `shop=chemist`, `shop=bicycle`, or `shop=copyshop`. This returns likely real OSM places, not guaranteed product inventory. Result clustering, external geocoding services, and route planning are not used.
+- context index: includes surrounding admin names for full address queries
+- primary-field index: uses object-owned fields first for simple name queries
 
-Natural queries can use the current map view as their frame of reference. If a query contains an explicit place or address, the backend uses that address as the search origin. If the query has no usable place, the frontend sends the current map center as `lat` and `lon`, and the backend uses that point as the origin. The response includes `originSource` so this is visible: `address` means the typed place was used, `viewport` means the map center was used, and `none` means no valid origin was available. If Ollama invents an address that is not present in the user's text, the backend ignores that invented address and uses the supplied viewport center instead.
+This prevents a single-token query such as `Stuttgart` from returning every house located inside Stuttgart before returning the city or direct POI/name matches.
 
-When the server starts on Ubuntu/Linux, it can also start local Ollama automatically. If `OSM_AUTO_OLLAMA` is not disabled and no Ollama server is already listening on the configured local host and port, the backend starts `ollama serve`, warms the selected model, and stops only that managed Ollama process when the OSM server exits. If Ollama was already running before the OSM server started, the backend uses it but does not terminate it. The frontend also has a `Start Ollama Service` button under the geocoder. That button calls `/api/ollama/start`, clears the configured local Ollama port, starts `ollama serve`, warms the configured model, and reports the result in the browser.
+Text normalization:
 
-The `/api/stats` endpoint also exposes server-side index build metrics, including spatial-index build time, forward-index build time, posting-list counts, grid-cell counts, and an explicitly estimated forward-index memory value. The estimate is not reported as exact heap use; it is a coherent size estimate based on stored postings, token strings, and vector metadata.
+- lowercase matching
+- punctuation becomes spacing
+- German street variants normalize toward `strasse`
+- German umlaut spellings normalize toward ASCII forms such as `ae`, `oe`, and `ue`
+- duplicate tokens are removed
 
-## 10. Compact Storage
+## 16. Substring And Fuzzy Search
 
-The Europe PBF used for testing is about 32 GB. The program does not keep the full OSM file in RAM. It keeps only the reduced objects needed for this project.
+Substring search expands query fragments to indexed tokens. It uses suffix entries built from the vocabulary.
 
-Memory is reduced by:
+Fuzzy search is bounded:
 
-- storing coordinates as `int32` E7 values, for example `48.7758` as `487758000`
-- pooling repeated strings so each street name is stored once
-- storing street and admin geometry in shared coordinate arrays
-- storing only offsets and lengths in street and admin records
-- storing house-to-admin matches as compact integer indexes
-- reducing building polygons to one house point
-- skipping unused OSM metadata such as timestamp, user ID, version, and changeset
+- tokens shorter than 4 characters are not fuzzy-expanded
+- medium tokens allow small edit distance
+- longer tokens allow a slightly larger edit distance
+- vocabulary scanning is capped
 
-This gives the program a compact in-memory dataset that can also be written to a binary snapshot.
+Both features only expand to tokens already present in the local index. They do not invent new places.
 
-## 11. Needed-Node Architecture
+## 17. Natural-Language Search With Ollama
 
-The important scalability idea is the needed-node lookup.
+Natural-language search is exposed through:
 
-A simple parser would store every OSM node coordinate first and then use that table to build ways. That is easy, but Europe has billions of nodes, so the full node table can fill RAM and force the operating system to swap to disk.
-
-The compact approach:
-
-1. scan administrative boundary relations and addressed building relations, and remember the boundary member ways needed for outer and inner rings
-2. scan named streets and collect endpoint nodes
-3. scan unnamed road candidates and recover short connectors and roundabouts that touch named streets
-4. scan useful ways and collect node IDs only from those ways
-5. sort and deduplicate those node IDs
-6. scan nodes and store coordinates only for needed node IDs
-7. scan ways again and build house points, street lines, and admin polygons
-8. assemble administrative relation polygons from their member ways
-9. attach administrative area references to stored houses, streets, and administrative areas
-
-With `--low-memory`, the useful-way extraction is split into two named phases:
-
-- `Address And Boundary Extraction`: houses and administrative boundaries
-- `Street Line Extraction`: named streets plus recovered unnamed connectors
-
-This reads the PBF more times, but the scans are sequential. Sequential scans are much cheaper than overflowing RAM. A small bucket index over the sorted node IDs keeps coordinate lookup fast.
-
-During parsing, the program prints phase-aware progress with elapsed time and ETA:
-
-- PBF scan phases use the compressed file byte offset reported by libosmium.
-- Administrative attribution uses the number of houses, streets, and admin areas processed.
-- Binary snapshot writing uses the current output-file position against the estimated snapshot size.
-- Binary snapshots include administrative ring metadata. Snapshots written by older builds must be regenerated from the PBF.
-
-On a real terminal, progress updates in place on the same line. When output is redirected to a file, progress is written as normal log lines so the log remains readable.
-
-The ETA is an estimate. It is reliable for long sequential scans, but CPU-heavy phases can speed up or slow down depending on geometry complexity.
-
-When starting the GUI/server from a binary snapshot, the server shows progress while building the runtime spatial indexes before it prints the localhost URL. The forward-geocoder index is loaded from the snapshot and must already be present.
-
-## 12. Binary Snapshots
-
-Large PBF parsing takes minutes, so the reduced dataset can be saved:
-
-```bash
-./build-linux/osm_parser \
-  --parse europe-latest.osm.pbf \
-  --low-memory \
-  --save-binary europe_reduced.bin \
-  --pbf-threads 24
+```text
+/api/natural-geocode
 ```
 
-The snapshot can later be loaded without reparsing:
+The GUI uses this endpoint when the checkbox `Use LLM for natural-language query` is enabled.
 
-```bash
-./build-linux/osm_parser \
-  --load-binary europe_reduced.bin \
-  --server 8080
+Examples:
+
+```text
+where can I find burger king in Stuttgart
+wo finde ich eine Apotheke in Karlsruhe
+where can I buy milk near me
+closest park to Koenigstrasse 1 Stuttgart
 ```
 
-The binary snapshot format is meant for the same platform and build style that created it. A snapshot written by the Ubuntu build should be loaded by the Ubuntu build. Current snapshots include administrative ring metadata and the forward-geocoder index. Older snapshots must be regenerated from the PBF.
+Ollama does not return final places. It only drafts structured intent JSON. The backend then validates the intent and searches the local PBF-derived indexes.
 
-## 13. GUI
+The Ollama flow:
 
-The GUI uses a C++ backend server and a Leaflet frontend. The backend uses the vendored single-header `cpp-httplib` server.
+1. user writes a natural sentence
+2. backend sends it to the local Ollama model
+3. Ollama drafts strict JSON intent
+4. Ollama verifies that JSON in two local verification passes
+5. backend validates the schema and allowed intent
+6. backend checks the local knowledge graph
+7. backend searches the PBF-derived index
+8. backend ranks real stored OSM objects
 
-When the map moves or zooms, the frontend asks the backend for houses, streets, and administrative areas inside the current viewport. The backend uses grid indexes for these requests, so it checks only nearby grid cells instead of scanning every stored object. This keeps viewport loading practical on large datasets.
+If the query has an explicit place or address, that text is used as the origin. If the query has no explicit place, the frontend sends the current map center, and the backend can use it as a viewport origin.
 
-Administrative geometry endpoints accept `maxPoints=<n>` and return `geometryMeta` with `sourcePoints`, `writtenPoints`, and `simplified`. The frontend requests bounded geometry by default to avoid very large polygon payloads. For debugging, `/api/admin-area?...&detail=full` and `/api/admin?...&detail=full` return full geometry.
+## 18. Local Knowledge Graph
 
-Map colors:
+The knowledge graph is a local set of typed concepts and allowed connections. It is not a remote database and not an LLM memory.
 
-- orange dots: houses or address points
+Node types:
+
+- product concept: medicine, bread, groceries, electronics, fuel
+- service concept: bike repair, document printing, eating, charging, parking, banking
+- brand concept: a chain or company name that may appear in `name`, `brand`, or `operator`
+- category concept: restaurant, fast food, pharmacy, hotel, fuel, park, museum
+- place/origin concept: typed address, typed city, map center, viewport
+- OSM tag concept: `shop=*`, `amenity=*`, `tourism=*`, `leisure=*`, `name`, `brand`, `operator`
+
+Edge meanings:
+
+- product likely sold at category
+- service provided by category
+- brand matches POI text fields
+- category maps to OSM tags
+- place/origin limits or biases the search
+
+Example:
+
+```text
+query: where can I buy cough syrup near me
+concept: cough syrup
+graph target: pharmacy or chemist
+OSM tags: amenity=pharmacy, shop=chemist
+final results: real local OSM POIs matching those tags
+```
+
+The graph can say that a pharmacy or chemist is a likely search target for cough syrup. It cannot prove live shelf inventory. The program returns likely real OSM places, not guaranteed product stock.
+
+Brand handling is mostly generic. The backend searches indexed `name`, `brand`, and `operator` fields instead of maintaining a huge brand table. A small amount of deterministic cleanup is used for obvious variants such as `McDonalds`, `H&M`, and `C&A`.
+
+## 19. Ranking
+
+Ranking combines several signals:
+
+- object type
+- exact text match
+- token match count
+- house number match
+- postcode match
+- street-name match
+- admin/place context
+- POI name, brand, operator, and category relevance
+- graph relevance for natural-language queries
+- distance from resolved origin
+- viewport/map-center relevance when no typed origin exists
+
+For address queries, exact house numbers and street names are strong signals.
+
+For place queries, admin areas and direct POI/name matches are stronger than houses that merely sit inside a place.
+
+For natural product/service queries, the backend first chooses valid local POI candidates through the graph and then ranks by text, category, distance, and place context.
+
+## 20. Binary Snapshot Format
+
+The binary snapshot stores the reduced dataset and the embedded forward-geocoder index.
+
+It includes:
+
+- strings
+- houses
+- streets
+- POIs
+- administrative areas
+- admin rings
+- shared street geometry
+- shared admin geometry
+- house-admin links
+- street-admin links
+- POI-admin links
+- admin-parent links
+- forward-geocoder posting lists
+- forward-geocoder suffix data
+
+The snapshot is meant for the same platform and build style that created it. A snapshot written by the Ubuntu build should be loaded by the Ubuntu build.
+
+Older snapshots that do not contain admin ring metadata or the embedded forward index are rejected. Reparse the PBF and write a new snapshot.
+
+## 21. Memory And Performance Design
+
+The program reduces memory pressure by:
+
+- storing coordinates as compact integer E7 values
+- pooling repeated strings
+- storing street/admin geometry in shared arrays
+- storing offsets and sizes instead of separate geometry vectors per record
+- storing admin rings separately from admin area records
+- using checked integer casts for offsets and sizes
+- clearing temporary string lookup maps before expensive admin attribution
+- using compact needed-node storage
+- using flat relation-way geometry storage
+- saving the forward-geocoder index in the binary snapshot
+
+The important parser idea is the needed-node architecture. OSM ways store node IDs, not coordinates. A simple parser would keep every node coordinate first. Europe has billions of nodes, so that approach can fill RAM. This parser first learns which node IDs are needed, sorts and deduplicates them, then scans nodes and stores only those coordinates.
+
+With `--low-memory`, the parser uses extra sequential PBF scans to lower peak RAM. Sequential scans take time, but they are usually better than swapping.
+
+## 22. GUI Features
+
+The GUI is served by the C++ backend and rendered with Leaflet.
+
+Main visual layers:
+
+- orange dots: houses/address points
 - blue lines: street ways
-- green polygons: administrative boundaries
-- black highlighted point, line, or polygon: forward geocoder result
-- black marker and line: reverse geocoder click result
-- dark green outlines: administrative polygons matched by the point-in-polygon lookup
+- green polygons: administrative areas
+- purple/black highlighted markers: forward geocoder results
+- black marker and line: reverse geocoder result
+- dark green outlines: matched admin polygons
 
-Click behavior:
+Sidebar features:
 
-- geocoder text field: sends text queries to `/api/geocode`, displays the timed result list, and highlights returned objects on the map
-- LLM checkbox: sends natural-language geocoder queries to `/api/natural-geocode` and includes the current map center as a fallback origin
-- map click lookup checkbox: enables or disables reverse geocoder requests from map clicks
-- map click while lookup is enabled: best result, closest stored house, nearest street, address fields, and admin areas
-- map click while lookup is disabled: normal inspect mode for visible houses, streets, and administrative areas
-- clear result button: removes the reverse geocoder marker, line, and matched admin polygons
-- house popup: street, house number, place, OSM ID
-- street popup: street label, highway type, OSM ID
-- admin popup: boundary name, admin level, OSM ID
+- dataset statistics
+- cursor coordinate display
+- deterministic geocoder text box
+- LLM checkbox for natural-language mode
+- `Start Ollama Service` button
+- query time and result count
+- ranked result list
+- reverse-geocoder click lookup toggle
+- clear reverse result button
 
-The reverse geocoder result uses a separate highlight layer, so matched administrative polygons are shown even when the normal viewport layer omits larger boundaries at the current zoom level. While map click lookup is enabled, visible map objects do not catch the click first. The clicked coordinate is sent to the reverse geocoder, and the backend decides whether the best result is a house, street, or administrative area.
+Viewport loading is bounded. The frontend requests houses, streets, and admin areas for the current map view instead of downloading the whole dataset at once.
 
-When map click lookup is disabled, the frontend uses the visible viewport data for normal inspect popups. It checks for a nearby house first, then a nearby street, and then the most detailed visible administrative area containing the click. If streets are visible and the click is near a street inside a large polygon, the street popup is shown because the street is the more specific visible object.
+Admin geometry endpoints support `maxPoints=<n>` and simplified geometry responses, so large polygons do not freeze the browser.
 
-## 14. Requirements On Ubuntu 22.04
+## 23. HTTP API Endpoints
 
-Install the compiler, CMake, Ninja, and the system libraries needed by libosmium:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build zlib1g-dev libbz2-dev libexpat1-dev
-```
-
-What these packages provide:
-
-- `build-essential`: C++ compiler and basic build tools
-- `cmake`: generates the build files
-- `ninja-build`: runs the build quickly
-- `zlib1g-dev`: zlib compression library used while reading compressed OSM data
-- `libbz2-dev`: bzip2 compression library used by libosmium
-- `libexpat1-dev`: XML parser library used by libosmium
-
-The `--pbf-threads` value should match the machine. More threads can make PBF decoding faster, but they can also increase CPU and memory pressure. On a smaller laptop, use a lower value such as `4` or `8`. On a stronger machine with enough RAM, a higher value such as `16` or `24` can be used.
-
-The required header-only dependencies are included here:
+Main endpoints:
 
 ```text
-third_party/cpp-httplib/httplib.h
-third_party/libosmium/include
-third_party/protozero/include
+/api/stats
+/api/geocode?q=<query>&limit=<n>
+/api/natural-geocode?q=<query>&useLlm=1&lat=<lat>&lon=<lon>&limit=<n>
+/api/reverse?lat=<lat>&lon=<lon>
+/api/houses?bbox=<south>,<west>,<north>,<east>&limit=<n>
+/api/streets?bbox=<south>,<west>,<north>,<east>
+/api/admin?bbox=<south>,<west>,<north>,<east>&maxPoints=<n>
+/api/admin-area?index=<n>&maxPoints=<n>
+/api/ollama/start
 ```
 
-So the project normally does not need `libosmium`, `protozero`, or `cpp-httplib` installed globally on Linux. The `PATH` variable does not need to be edited for them.
+`/api/stats` includes dataset counts, parse timings, spatial-index metrics, forward-index metrics, and estimated forward-index memory.
 
-`PATH` is the shell variable Linux uses to find executable programs. Header-only libraries are not executable programs, so they do not belong in `PATH`.
+`/api/geocode` is deterministic and does not call Ollama.
 
-CMake finds the bundled headers through `CMakeLists.txt`. If CMake asks for the Protozero or Libosmium path, first check that the folders are really present:
+`/api/natural-geocode` can call Ollama when `useLlm=1`.
 
-```bash
-ls third_party
-ls third_party/protozero/include/protozero
-ls third_party/libosmium/include/osmium
-```
+`/api/ollama/start` starts or restarts the configured local Ollama service from the backend.
 
-If those commands show files, the dependencies are inside the project. Delete the build folder and run CMake again from the project root:
-
-```bash
-rm -rf build-linux
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux -j
-```
-
-If CMake still asks for the paths, give the include folders manually:
-
-```bash
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DLIBOSMIUM_INCLUDE_DIR="$PWD/third_party/libosmium/include" \
-  -DPROTOZERO_INCLUDE_DIR="$PWD/third_party/protozero/include"
-```
-
-## 15. Build
-
-From the project folder:
-
-```bash
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux -j
-```
-
-Executable:
-
-```text
-build-linux/osm_parser
-```
-
-## 16. Basic Commands
-
-Parse a PBF:
-
-```bash
-./build-linux/osm_parser --parse /path/to/region.osm.pbf
-```
-
-Parse with low-memory mode and save a binary snapshot:
-
-```bash
-./build-linux/osm_parser \
-  --parse europe-latest.osm.pbf \
-  --low-memory \
-  --save-binary europe_reduced.bin \
-  --pbf-threads 24
-```
-
-Load a binary snapshot:
-
-```bash
-./build-linux/osm_parser --load-binary europe_reduced.bin
-```
-
-Start the GUI from a binary snapshot:
-
-```bash
-./build-linux/osm_parser --load-binary europe_reduced.bin --server 8080
-```
-
-Open:
-
-[http://localhost:8080](http://localhost:8080)
-
-## 17. Command Line Options
+## 24. Command Line Options
 
 ```text
 --parse <input.osm.pbf>       Parse a PBF file
@@ -505,221 +731,249 @@ Open:
 --geojson-admin <n>           Admin area export limit
 --server [port]               Start the backend and Leaflet frontend
 --viewport-limit <n>          Maximum houses returned in one viewport request
---help                        Show all command line options
+--help                        Show command line help
 ```
 
-Ollama runtime environment variables:
+## 25. Ollama Environment Variables
 
 ```text
 OSM_AUTO_OLLAMA=0             Disable automatic Ollama startup
-OSM_OLLAMA_BIN=<path>         Ollama executable path, if it is not on PATH
-OSM_OLLAMA_MODEL=<name>       Local model used for natural-language intent parsing
+OSM_OLLAMA_BIN=<path>         Ollama executable path if it is not on PATH
+OSM_OLLAMA_MODEL=<name>       Model name, recommended: qwen2.5:3b
 OSM_OLLAMA_HOST=<host>        Ollama host, default localhost
 OSM_OLLAMA_PORT=<port>        Ollama port, default 11434
 OSM_OLLAMA_TIMEOUT_SECONDS=n  Timeout for Ollama generation calls
 OSM_OLLAMA_WARMUP=0           Disable model warmup at server startup
 ```
 
-## 18. Console Metrics
-
-The console prints detailed phase metrics while the parser runs. These help with performance checks because they show what each scan did and how long it took.
-
-Important scan sections:
-
-- `Administrative Boundary Relation Scan`: scans OSM relations, keeps administrative boundary relations and addressed building relations, and records the boundary member ways needed later.
-- `Address And Boundary Extraction`: builds house points and administrative boundary way geometry.
-- `Street Line Extraction`: builds street line geometry.
-- `Administrative Boundary Assembly`: builds administrative polygons from relation member ways.
-- `Administrative Attribute Lookup`: stores admin links for houses, streets, and administrative parent areas.
-- `Street connection`: merges connected street segments when `--connect-streets` is enabled.
-
-`Administrative Attribute Lookup` is often the largest time cost on Europe-sized data because it performs many point-in-polygon checks. The admin-parent part uses one representative interior point per smaller administrative area instead of testing many boundary points. This keeps the parent-area result useful while reducing repeated geometry work.
-
-Each extraction phase prints only the main scale, memory, and time numbers:
-
-- `OSM ways used`: ways that matter for that phase
-- `Lookup index memory`: memory used by the small coordinate lookup index
-- `Time`: total time for that extraction phase
-
-The `Address And Boundary Extraction` time includes house extraction. The separate `House Extraction` section prints the house counts, including how many address nodes, building ways, and building relations were stored.
-
-Important count sections:
-
-- `Houses extracted`: all stored house and address objects
-- `Houses from nodes`: addresses that were already stored as OSM nodes
-- `Houses from ways`: addressed building ways reduced to one point
-- `Houses from relations`: addressed building relations reduced to one point
-- `Houses missing street`: stored houses without `addr:street`
-- `Houses missing number`: stored houses without `addr:housenumber`
-- `Houses with admin areas`: stored houses that matched at least one administrative polygon
-- `House-admin links`: total stored house-to-admin references
-- `Streets with admin areas`: stored street records that matched at least one administrative polygon
-- `Street-admin links`: total stored street-to-admin references
-- `Admin areas with parents`: administrative polygons with at least one larger parent area
-- `Admin-parent links`: total stored admin-to-parent references
-- `Admin areas from relations`: administrative polygons assembled from relation member ways
-- `Street records before`: street line records before connection
-- `Street records after`: street line records after connection
-- `Street records reduced`: how many records were removed by connecting segments
-
-Final timing and memory lines:
-
-- `Total time taken`: the sum of the printed phase times, shown in seconds and minutes
-- `Total memory used`: peak RSS during the run
-- `Timing breakdown`: shows how relation scan, extraction, boundary assembly, administrative attribute lookup, and street connection add up
-
-`RSS` means resident set size, which is the part of the process that is actually in RAM.
-
-The Leaflet frontend shows the final dataset stats, current viewport counts, and reverse geocoder result. Reverse geocoder lookup is disabled by default and can be enabled from the sidebar when an address lookup is needed. The per-scan extraction details stay in the console so the sidebar does not become noisy.
-
-## 19. GeoJSON Export
-
-Sample export:
+Recommended demo values:
 
 ```bash
-./build-linux/osm_parser --parse /path/to/region.osm.pbf --geojson out.geojson
+OSM_OLLAMA_MODEL=qwen2.5:3b
+OSM_OLLAMA_HOST=127.0.0.1
+OSM_OLLAMA_TIMEOUT_SECONDS=30
 ```
 
-With explicit limits:
+## 26. Console Progress And Metrics
+
+The parser prints phase-aware progress and final metrics.
+
+Important phases:
+
+- administrative relation scan
+- street endpoint recovery scan
+- needed-node collection
+- node coordinate scan
+- address and boundary extraction
+- street line extraction
+- boundary assembly
+- administrative attribute lookup
+- street connection
+- forward-geocoder index build
+- binary snapshot writing
+
+Important counters:
+
+- scanned nodes, ways, and relations
+- houses from nodes, ways, and relations
+- houses missing street
+- houses missing number
+- stored streets
+- stored POIs
+- admin areas from ways and relations
+- house-admin links
+- street-admin links
+- POI-admin links
+- admin-parent links
+
+Important timings:
+
+- boundary relation scan
+- dataset extraction
+- boundary assembly
+- admin attribute lookup
+- street connection
+- forward-index build
+- binary writing
+- total time
+
+Important memory lines:
+
+- compact dataset size
+- peak RSS
+- estimated forward-index memory
+
+`RSS` means resident set size, the part of the process that is actually resident in RAM.
+
+## 27. GeoJSON Export
+
+Export a bounded sample for inspection:
 
 ```bash
-./build-linux/osm_parser \
-  --parse /path/to/region.osm.pbf \
-  --geojson out.geojson \
+/path/to/osm-task1-build/osm_parser \
+  --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
+  --geojson /path/to/output/baden-sample.geojson
+```
+
+Export with explicit limits:
+
+```bash
+/path/to/osm-task1-build/osm_parser \
+  --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
+  --geojson /path/to/output/baden-sample.geojson \
   --geojson-houses 10000 \
   --geojson-streets 2000 \
   --geojson-admin 300
 ```
 
-## 20. Main Files
-
-- `CMakeLists.txt`: build configuration
-- `include/data_model.h`: compact data structures
-- `include/parser.h`: parser interface
-- `include/server.h`: server interface
-- `src/main.cpp`: command line handling
-- `src/parser.cpp`: parser implementation entry file
-- `src/parser_parts/core_types.cpp`: shared parser types
-- `src/parser_parts/tag_rules.cpp`: OSM tag checks
-- `src/parser_parts/geo_lookup.cpp`: geometry and area lookup
-- `src/parser_parts/node_store.cpp`: compact node lookup
-- `src/parser_parts/runtime_io.cpp`: memory and binary helpers
-- `src/parser_parts/pbf_scans.cpp`: PBF scan handlers
-- `src/parser_parts/street_merge.cpp`: street connection
-- `src/parser_parts/parser_flow.cpp`: parser command flow
-- `src/server.cpp`: `cpp-httplib` HTTP backend and API endpoints
-- `frontend/index.html`: Leaflet GUI
-- `third_party/README.md`: bundled third-party header notes
-
-The parser part files are included by `src/parser.cpp`. This keeps the parser behavior the same, but the code is easier to read because each file has one clear job.
-
-## 21. Installation Commands
-
-Install Ubuntu build dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build zlib1g-dev libbz2-dev libexpat1-dev
-```
-
-Go to the project folder:
-
-```bash
-cd /path/to/Parser-OSM-Project
-```
-
-Build the executable:
-
-```bash
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux -j
-```
-
-Build with manual dependency paths if CMake asks for Protozero or Libosmium:
-
-```bash
-rm -rf build-linux
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DLIBOSMIUM_INCLUDE_DIR="$PWD/third_party/libosmium/include" \
-  -DPROTOZERO_INCLUDE_DIR="$PWD/third_party/protozero/include"
-cmake --build build-linux -j
-```
-
-Parse a PBF, connect streets, and save a binary snapshot:
-
-```bash
-./build-linux/osm_parser \
-  --parse input.osm.pbf \
-  --low-memory \
-  --connect-streets \
-  --save-binary output.bin \
-  --pbf-threads 8
-```
-
-Start the GUI from a binary snapshot:
-
-```bash
-./build-linux/osm_parser \
-  --load-binary output.bin \
-  --server 8080
-```
-
-Open the GUI:
+## 28. Main Source Files
 
 ```text
-http://localhost:8080
+CMakeLists.txt                         build configuration
+include/data_model.h                   compact records and indexes
+include/parser.h                       parser interface
+include/geocode_index.h                forward-geocoder index interface
+include/server.h                       server interface
+src/main.cpp                           command line handling
+src/parser.cpp                         parser entry file
+src/geocode_index.cpp                  forward index, substring, fuzzy helpers
+src/parser_parts/core_types.cpp        parser helper types
+src/parser_parts/tag_rules.cpp         OSM tag rules
+src/parser_parts/geo_lookup.cpp        geometry and admin lookup
+src/parser_parts/node_store.cpp        compact needed-node store
+src/parser_parts/runtime_io.cpp        memory and binary helpers
+src/parser_parts/pbf_scans.cpp         PBF scan handlers
+src/parser_parts/street_merge.cpp      street connection
+src/parser_parts/parser_flow.cpp       parser command flow and snapshot IO
+src/server.cpp                         HTTP API, reverse geocoder, natural search
+frontend/index.html                    Leaflet GUI
+docs/osm_program_explained.pdf         illustrated explanation
+third_party/README.md                  bundled dependency notes
 ```
 
-## 22. Easy Run Commands
+The parser part files are included by `src/parser.cpp`. This keeps one compiled parser translation unit while making the implementation easier to navigate.
 
-Use these commands on Ubuntu 22.04 when the project is in `/home/ganesh/osm-task1`.
+## 29. Troubleshooting
 
-Build the executable:
+### 29.1 `Binary snapshot has no embedded forward index`
+
+The binary snapshot was written by an older build. Reparse the PBF and save a new `.bin`.
+
+### 29.2 `Binary snapshot not found`
+
+Check the path:
 
 ```bash
-cd /home/ganesh/osm-task1
-cmake -S . -B /home/ganesh/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build /home/ganesh/osm-task1-build
+ls -lh /path/to/output/europe-geocoder.bin
 ```
 
-Check that the Europe binary snapshot exists:
+Then start the server with the same path.
+
+### 29.3 Ollama command not found
+
+Install Ollama:
 
 ```bash
-ls -lh /home/ganesh/europe-geocoder.bin
+curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-Start the GUI from the Europe binary snapshot:
+Then check:
 
 ```bash
-cd /home/ganesh/osm-task1
+ollama --version
+```
+
+If Ollama is installed but not on `PATH`, set:
+
+```bash
+OSM_OLLAMA_BIN=/path/to/ollama
+```
+
+### 29.4 Ollama port already in use
+
+The server can use an existing Ollama process. If you want the frontend button to restart Ollama, use the `Start Ollama Service` button.
+
+Manual check:
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+### 29.5 Server looks frozen after loading a binary
+
+The server builds runtime spatial indexes before printing the localhost URL. For Europe, this can still take time, but the forward-geocoder index is loaded from the snapshot and should not be rebuilt from scratch.
+
+### 29.6 Europe parse slows down during a phase
+
+The progress speed is an average over the phase. CPU-heavy geometry work, disk cache changes, memory pressure, and WSL filesystem speed can make the displayed throughput drop. Keep the PBF and build under `/path/to`, use `--low-memory`, and reduce `--pbf-threads` if swap pressure starts.
+
+### 29.7 Browser shows zero LLM results
+
+Check these in order:
+
+1. Ollama is installed.
+2. `qwen2.5:3b` is installed.
+3. The server was started with the Ollama environment variables.
+4. The GUI checkbox `Use LLM for natural-language query` is enabled.
+5. The query has enough context, or the map is centered near the area you want.
+
+### 29.8 No product inventory guarantee
+
+The local knowledge graph can map a product to likely OSM categories. It cannot know live store inventory. For example, it can search pharmacies or chemists for cough syrup, but it cannot prove that one specific shelf currently contains cough syrup.
+
+## 30. Quick Command Template
+
+These commands use placeholder paths. Replace them with your local paths:
+
+```text
+repository: /path/to/osm-task1
+build:      /path/to/osm-task1-build
+Europe PBF: /path/to/data/europe-latest.osm.pbf
+Europe bin: /path/to/output/europe-geocoder.bin
+model:      qwen2.5:3b
+```
+
+Build:
+
+```bash
+cd /path/to/osm-task1
+cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build /path/to/osm-task1-build
+```
+
+Install Ollama and model:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:3b
+```
+
+Parse Europe:
+
+```bash
+cd /path/to/osm-task1
+/path/to/osm-task1-build/osm_parser \
+  --parse /path/to/data/europe-latest.osm.pbf \
+  --low-memory \
+  --connect-streets \
+  --save-binary /path/to/output/europe-geocoder.bin \
+  --pbf-threads 24
+```
+
+Start the Europe GUI:
+
+```bash
+cd /path/to/osm-task1
 OSM_OLLAMA_MODEL=qwen2.5:3b \
 OSM_OLLAMA_HOST=127.0.0.1 \
 OSM_OLLAMA_TIMEOUT_SECONDS=30 \
-/home/ganesh/osm-task1-build/osm_parser \
-  --load-binary /home/ganesh/europe-geocoder.bin \
+/path/to/osm-task1-build/osm_parser \
+  --load-binary /path/to/output/europe-geocoder.bin \
   --server 8080
 ```
 
-Open the GUI:
+Open:
 
 ```text
 http://localhost:8080
 ```
-
-The server starts Ollama automatically if it is not already running. Stop the server with `Ctrl+C`. If the server started Ollama itself, it also stops that managed Ollama process during shutdown.
-
-Quick API checks from another Ubuntu terminal:
-
-```bash
-curl "http://127.0.0.1:8080/api/stats"
-```
-
-```bash
-curl "http://127.0.0.1:8080/api/geocode?q=Berlin&limit=3"
-```
-
-```bash
-curl "http://127.0.0.1:8080/api/natural-geocode?q=Where%20can%20I%20buy%20milk%3F&useLlm=1&lat=48.7758&lon=9.1829&limit=3"
-```
-
-The last command has no city in the query. The backend should therefore use the supplied `lat` and `lon` as the viewport origin and return `originSource:"viewport"`.
