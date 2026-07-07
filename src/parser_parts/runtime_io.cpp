@@ -158,17 +158,28 @@ bool appendAtFrontIfConnected(std::vector<Coordinate>& chain, const std::vector<
 }
 
 std::vector<std::vector<Coordinate>> buildClosedRings(
-    const std::vector<uint64_t>& outerWayIds,
-    const std::unordered_map<uint64_t, std::vector<Coordinate>>& outerWayGeometry) {
+    const std::vector<uint64_t>& wayIds,
+    const std::vector<RelationWaySpan>& relationWaySpans,
+    const std::vector<Coordinate>& relationWayCoords) {
     std::vector<std::vector<Coordinate>> parts;
-    parts.reserve(outerWayIds.size());
+    parts.reserve(wayIds.size());
 
-    for (uint64_t wayId : outerWayIds) {
-        const auto found = outerWayGeometry.find(wayId);
-        if (found == outerWayGeometry.end() || found->second.size() < 2) {
+    for (uint64_t wayId : wayIds) {
+        const auto found = std::lower_bound(relationWaySpans.begin(),
+                                            relationWaySpans.end(),
+                                            wayId,
+                                            [](const RelationWaySpan& span, uint64_t value) {
+                                                return span.wayId < value;
+                                            });
+        const size_t available = found != relationWaySpans.end() && found->offset < relationWayCoords.size()
+            ? relationWayCoords.size() - found->offset
+            : 0;
+        if (found == relationWaySpans.end() || found->wayId != wayId || found->size < 2 ||
+            found->offset >= relationWayCoords.size() || static_cast<size_t>(found->size) > available) {
             continue;
         }
-        parts.push_back(found->second);
+        parts.emplace_back(relationWayCoords.begin() + found->offset,
+                           relationWayCoords.begin() + found->offset + found->size);
     }
 
     std::vector<std::vector<Coordinate>> rings;
@@ -207,14 +218,8 @@ std::vector<std::vector<Coordinate>> buildClosedRings(
     return rings;
 }
 
-std::vector<std::vector<Coordinate>> buildClosedRings(
-    const AdminRelationDefinition& relation,
-    const std::unordered_map<uint64_t, std::vector<Coordinate>>& outerWayGeometry) {
-    return buildClosedRings(relation.outerWayIds, outerWayGeometry);
-}
-
 void writeString(std::ofstream& out, const std::string& value) {
-    const uint32_t length = static_cast<uint32_t>(value.size());
+    const uint32_t length = checkedU32(value.size(), "serialized string length");
     out.write(reinterpret_cast<const char*>(&length), sizeof(length));
     if (length > 0) {
         out.write(value.data(), static_cast<std::streamsize>(length));

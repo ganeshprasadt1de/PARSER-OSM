@@ -51,7 +51,7 @@ public:
         std::sort(ids_.begin(), ids_.end());
         ids_.erase(std::unique(ids_.begin(), ids_.end()), ids_.end());
         coordinates_.assign(ids_.size(), Coordinate{});
-        found_.assign(ids_.size(), 0);
+        foundBits_.assign((ids_.size() + 63) / 64, 0);
         buildBucketIndex();
     }
 
@@ -70,7 +70,7 @@ public:
         }
 
         coordinates_[index] = coordinate;
-        found_[index] = 1;
+        markFound(index);
         return true;
     }
 
@@ -80,7 +80,7 @@ public:
             return false;
         }
 
-        if (found_[index] == 0) {
+        if (!isFound(index)) {
             return false;
         }
 
@@ -96,16 +96,26 @@ public:
         return coordinates_;
     }
 
-    std::vector<uint8_t>& foundFlags() {
-        return found_;
+    void markFound(size_t index) {
+        if (index >= ids_.size()) {
+            return;
+        }
+        foundBits_[index / 64] |= (uint64_t{1} << (index % 64));
     }
 
     size_t foundCount() const {
-        return static_cast<size_t>(std::count(found_.begin(), found_.end(), static_cast<uint8_t>(1)));
+        size_t total = 0;
+        for (uint64_t bits : foundBits_) {
+            while (bits != 0) {
+                bits &= bits - 1;
+                ++total;
+            }
+        }
+        return total;
     }
 
     size_t bucketIndexBytes() const {
-        return bucketStarts_.capacity() * sizeof(size_t);
+        return bucketStarts_.capacity() * sizeof(uint32_t);
     }
 
 private:
@@ -120,21 +130,29 @@ private:
             return;
         }
 
-        bucketStarts_.assign(static_cast<size_t>(maxBucket) + 2, ids_.size());
+        const uint32_t sentinel = checkedU32(ids_.size(), "needed node bucket sentinel");
+        bucketStarts_.assign(static_cast<size_t>(maxBucket) + 2, sentinel);
 
         size_t firstUnfilledBucket = 0;
         for (size_t index = 0; index < ids_.size(); ++index) {
             const size_t bucket = static_cast<size_t>(ids_[index] >> kBucketShift);
             while (firstUnfilledBucket <= bucket) {
-                bucketStarts_[firstUnfilledBucket] = index;
+                bucketStarts_[firstUnfilledBucket] = checkedU32(index, "needed node bucket start");
                 ++firstUnfilledBucket;
             }
         }
 
         while (firstUnfilledBucket < bucketStarts_.size()) {
-            bucketStarts_[firstUnfilledBucket] = ids_.size();
+            bucketStarts_[firstUnfilledBucket] = sentinel;
             ++firstUnfilledBucket;
         }
+    }
+
+    bool isFound(size_t index) const {
+        if (index >= ids_.size()) {
+            return false;
+        }
+        return (foundBits_[index / 64] & (uint64_t{1} << (index % 64))) != 0;
     }
 
     bool findIndex(uint64_t nodeId, size_t& indexOut) const {
@@ -175,8 +193,8 @@ private:
 
     std::vector<uint64_t> ids_;
     std::vector<Coordinate> coordinates_;
-    std::vector<uint8_t> found_;
-    std::vector<size_t> bucketStarts_;
+    std::vector<uint64_t> foundBits_;
+    std::vector<uint32_t> bucketStarts_;
 };
 
 std::vector<Coordinate> extractWayGeometryFromNeededNodes(const osmium::Way& way, const NeededNodeStore& neededNodes) {

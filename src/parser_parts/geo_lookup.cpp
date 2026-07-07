@@ -64,7 +64,8 @@ bool pointInPolygon(const Coordinate& point,
                     uint32_t offset,
                     uint32_t size,
                     const std::vector<uint32_t>& edgeIndexes) {
-    if (size < 4 || edgeIndexes.empty()) {
+    if (size < 4 || edgeIndexes.empty() || offset >= geometry.size() ||
+        static_cast<size_t>(size) > geometry.size() - offset) {
         return false;
     }
 
@@ -109,16 +110,17 @@ public:
         : cellSizeE7_(cellSizeE7) {}
 
     void build(const OSMDataset& data) {
-        for (uint32_t areaIndex = 0; areaIndex < data.adminAreas.size(); ++areaIndex) {
-            const AdminAreaRecord& area = data.adminAreas[areaIndex];
-            if (area.geometrySize < 4) {
+        for (uint32_t ringIndex = 0; ringIndex < data.adminRings.size(); ++ringIndex) {
+            const AdminRingRecord& ring = data.adminRings[ringIndex];
+            if (ring.geometrySize < 4 || ring.geometryOffset >= data.adminGeometry.size() ||
+                static_cast<size_t>(ring.geometrySize) > data.adminGeometry.size() - ring.geometryOffset) {
                 continue;
             }
 
-            for (uint32_t current = 0; current < area.geometrySize; ++current) {
-                const uint32_t previous = current == 0 ? area.geometrySize - 1 : current - 1;
-                const Coordinate& a = data.adminGeometry[area.geometryOffset + current];
-                const Coordinate& b = data.adminGeometry[area.geometryOffset + previous];
+            for (uint32_t current = 0; current < ring.geometrySize; ++current) {
+                const uint32_t previous = current == 0 ? ring.geometrySize - 1 : current - 1;
+                const Coordinate& a = data.adminGeometry[ring.geometryOffset + current];
+                const Coordinate& b = data.adminGeometry[ring.geometryOffset + previous];
 
                 const int32_t minLat = std::min(a.latE7, b.latE7);
                 const int32_t maxLat = std::max(a.latE7, b.latE7);
@@ -126,15 +128,15 @@ public:
                 const int32_t maxCell = floorDiv(maxLat, cellSizeE7_);
 
                 for (int32_t latCell = minCell; latCell <= maxCell; ++latCell) {
-                    cells_[areaLatKey(areaIndex, latCell)].push_back(current);
+                    cells_[ringLatKey(ringIndex, latCell)].push_back(current);
                 }
             }
         }
     }
 
-    const std::vector<uint32_t>* edgesFor(uint32_t areaIndex, const Coordinate& point) const {
+    const std::vector<uint32_t>* edgesForRing(uint32_t ringIndex, const Coordinate& point) const {
         const int32_t latCell = floorDiv(point.latE7, cellSizeE7_);
-        const auto found = cells_.find(areaLatKey(areaIndex, latCell));
+        const auto found = cells_.find(ringLatKey(ringIndex, latCell));
         if (found == cells_.end()) {
             return nullptr;
         }
@@ -142,8 +144,8 @@ public:
     }
 
 private:
-    static uint64_t areaLatKey(uint32_t areaIndex, int32_t latCell) {
-        return (static_cast<uint64_t>(areaIndex) << 32) | static_cast<uint32_t>(latCell);
+    static uint64_t ringLatKey(uint32_t ringIndex, int32_t latCell) {
+        return (static_cast<uint64_t>(ringIndex) << 32) | static_cast<uint32_t>(latCell);
     }
 
     int32_t cellSizeE7_;
@@ -235,6 +237,11 @@ void compactAdminMatchesByLevel(std::vector<uint32_t>& matches, const OSMDataset
     matches.swap(compact);
 }
 
+bool adminAreaContainsPoint(uint32_t areaIndex,
+                            const Coordinate& point,
+                            const OSMDataset& data,
+                            const AdminAreaEdgeIndex& edgeIndex);
+
 void findAdminAreasForPoint(const Coordinate& point,
                             const OSMDataset& data,
                             const AdminAreaGridIndex& index,
@@ -253,9 +260,7 @@ void findAdminAreasForPoint(const Coordinate& point,
         if (!area.bbox.contains(point)) {
             continue;
         }
-        const std::vector<uint32_t>* edges = edgeIndex.edgesFor(areaIndex, point);
-        if (edges == nullptr ||
-            !pointInPolygon(point, data.adminGeometry, area.geometryOffset, area.geometrySize, *edges)) {
+        if (!adminAreaContainsPoint(areaIndex, point, data, edgeIndex)) {
             continue;
         }
         matches.push_back(areaIndex);
@@ -273,9 +278,42 @@ bool adminAreaContainsPoint(uint32_t areaIndex,
     if (!area.bbox.contains(point)) {
         return false;
     }
-    const std::vector<uint32_t>* edges = edgeIndex.edgesFor(areaIndex, point);
-    return edges != nullptr &&
-           pointInPolygon(point, data.adminGeometry, area.geometryOffset, area.geometrySize, *edges);
+    bool insideOuter = false;
+    const uint32_t available = area.ringOffset < data.adminRings.size()
+        ? std::min<uint32_t>(area.ringSize, checkedU32(data.adminRings.size() - area.ringOffset, "admin ring available size"))
+        : 0;
+    for (uint32_t i = 0; i < available; ++i) {
+        const uint32_t ringIndex = area.ringOffset + i;
+        const AdminRingRecord& ring = data.adminRings[ringIndex];
+        if (ring.adminAreaIndex != areaIndex) {
+            continue;
+        }
+        const std::vector<uint32_t>* edges = edgeIndex.edgesForRing(ringIndex, point);
+        if (edges == nullptr) {
+            continue;
+        }
+        const bool insideRing = pointInPolygon(point,
+                                               data.adminGeometry,
+                                               ring.geometryOffset,
+                                               ring.geometrySize,
+                                               *edges);
+        if (!insideRing) {
+            continue;
+        }
+        if (ring.role == 1) {
+            return false;
+        }
+        insideOuter = true;
+    }
+    if (available == 0) {
+        std::vector<uint32_t> allEdges;
+        allEdges.reserve(area.geometrySize);
+        for (uint32_t i = 0; i < area.geometrySize; ++i) {
+            allEdges.push_back(i);
+        }
+        return pointInPolygon(point, data.adminGeometry, area.geometryOffset, area.geometrySize, allEdges);
+    }
+    return insideOuter;
 }
 
 Coordinate adminAreaCentroid(const AdminAreaRecord& area, const OSMDataset& data) {
@@ -283,8 +321,9 @@ Coordinate adminAreaCentroid(const AdminAreaRecord& area, const OSMDataset& data
         return Coordinate{0, 0};
     }
 
-    const uint32_t available = std::min<uint32_t>(area.geometrySize,
-        static_cast<uint32_t>(data.adminGeometry.size() - area.geometryOffset));
+    const uint32_t available = std::min<uint32_t>(
+        area.geometrySize,
+        checkedU32(data.adminGeometry.size() - area.geometryOffset, "admin geometry available size"));
     long double twiceArea = 0.0L;
     long double centroidLon = 0.0L;
     long double centroidLat = 0.0L;
@@ -330,8 +369,9 @@ Coordinate representativePointForAdminArea(uint32_t areaIndex,
     }
 
     if (area.geometryOffset < data.adminGeometry.size()) {
-        const uint32_t available = std::min<uint32_t>(area.geometrySize,
-            static_cast<uint32_t>(data.adminGeometry.size() - area.geometryOffset));
+        const uint32_t available = std::min<uint32_t>(
+            area.geometrySize,
+            checkedU32(data.adminGeometry.size() - area.geometryOffset, "admin geometry available size"));
         const uint32_t step = std::max<uint32_t>(1, available / 64);
         for (uint32_t i = 0; i < available; i += step) {
             const Coordinate point = data.adminGeometry[area.geometryOffset + i];
@@ -386,12 +426,12 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
 
     for (HouseRecord& house : data.houses) {
         matches.clear();
-        house.adminAreaOffset = static_cast<uint32_t>(data.houseAdminAreaIndexes.size());
+        house.adminAreaOffset = checkedU32(data.houseAdminAreaIndexes.size(), "house admin link offset");
         findAdminAreasForPoint(house.point, data, index, edgeIndex, matches);
         sortAndUniqueAdminMatches(matches, data);
 
         data.houseAdminAreaIndexes.insert(data.houseAdminAreaIndexes.end(), matches.begin(), matches.end());
-        house.adminAreaSize = static_cast<uint32_t>(matches.size());
+        house.adminAreaSize = checkedU32(matches.size(), "house admin link size");
 
         if (!matches.empty()) {
             data.stats.housesWithAdminAreas += 1;
@@ -405,10 +445,11 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
 
     for (StreetRecord& street : data.streets) {
         matches.clear();
-        street.adminAreaOffset = static_cast<uint32_t>(data.streetAdminAreaIndexes.size());
+        street.adminAreaOffset = checkedU32(data.streetAdminAreaIndexes.size(), "street admin link offset");
 
         const uint32_t available = street.geometryOffset < data.streetGeometry.size()
-            ? std::min<uint32_t>(street.geometrySize, static_cast<uint32_t>(data.streetGeometry.size() - street.geometryOffset))
+            ? std::min<uint32_t>(street.geometrySize,
+                  checkedU32(data.streetGeometry.size() - street.geometryOffset, "street geometry available size"))
             : 0;
         for (uint32_t i = 0; i < available; ++i) {
             findAdminAreasForPoint(data.streetGeometry[street.geometryOffset + i], data, index, edgeIndex, matches);
@@ -416,7 +457,7 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
         sortAndUniqueAdminMatches(matches, data);
 
         data.streetAdminAreaIndexes.insert(data.streetAdminAreaIndexes.end(), matches.begin(), matches.end());
-        street.adminAreaSize = static_cast<uint32_t>(matches.size());
+        street.adminAreaSize = checkedU32(matches.size(), "street admin link size");
 
         if (!matches.empty()) {
             data.stats.streetsWithAdminAreas += 1;
@@ -430,12 +471,12 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
 
     for (PoiRecord& poi : data.pois) {
         matches.clear();
-        poi.adminAreaOffset = static_cast<uint32_t>(data.poiAdminAreaIndexes.size());
+        poi.adminAreaOffset = checkedU32(data.poiAdminAreaIndexes.size(), "poi admin link offset");
         findAdminAreasForPoint(poi.point, data, index, edgeIndex, matches);
         sortAndUniqueAdminMatches(matches, data);
 
         data.poiAdminAreaIndexes.insert(data.poiAdminAreaIndexes.end(), matches.begin(), matches.end());
-        poi.adminAreaSize = static_cast<uint32_t>(matches.size());
+        poi.adminAreaSize = checkedU32(matches.size(), "poi admin link size");
 
         if (!matches.empty()) {
             data.stats.poisWithAdminAreas += 1;
@@ -450,7 +491,7 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
     for (uint32_t areaIndex = 0; areaIndex < data.adminAreas.size(); ++areaIndex) {
         AdminAreaRecord& area = data.adminAreas[areaIndex];
         matches.clear();
-        area.parentAreaOffset = static_cast<uint32_t>(data.adminParentAreaIndexes.size());
+        area.parentAreaOffset = checkedU32(data.adminParentAreaIndexes.size(), "admin parent link offset");
 
         const Coordinate representativePoint = representativePointForAdminArea(areaIndex, data, edgeIndex);
         findAdminAreasForPoint(representativePoint, data, index, edgeIndex, matches);
@@ -462,7 +503,7 @@ void assignAdministrativeAttributes(OSMDataset& data, bool showProgress = true) 
         compactAdminMatchesByLevel(matches, data);
 
         data.adminParentAreaIndexes.insert(data.adminParentAreaIndexes.end(), matches.begin(), matches.end());
-        area.parentAreaSize = static_cast<uint32_t>(matches.size());
+        area.parentAreaSize = checkedU32(matches.size(), "admin parent link size");
 
         if (!matches.empty()) {
             data.stats.adminAreasWithParents += 1;

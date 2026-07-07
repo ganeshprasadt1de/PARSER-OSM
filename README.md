@@ -4,6 +4,8 @@ This project turns a large OpenStreetMap `.osm.pbf` file into a smaller dataset 
 
 The `--connect-streets` mode can join street segments when they have the same street identity and touch each other.
 
+The full illustrated explanation is available in `docs/osm_program_explained.pdf`. It explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, and binary snapshot format.
+
 ## 1. What The Parser Extracts
 
 The parser reads the three main OSM primitive types:
@@ -146,7 +148,7 @@ The parser stores administrative boundaries as polygons. These polygons are late
 Supported sources:
 
 - closed administrative boundary ways
-- administrative boundary relations made from outer member ways
+- administrative boundary relations made from outer and inner member ways
 
 Admin levels `2` to `12` are kept.
 
@@ -224,7 +226,7 @@ The forward geocoder answers text queries such as:
 Hauptstrasse 10 Aalen
 ```
 
-The backend builds an in-memory inverted index when the server starts. It does not change the parser output or the binary snapshot format. The index is built from the reduced dataset that already exists:
+The backend uses a forward-geocoder index stored inside the binary snapshot. When a PBF is parsed and saved, the parser builds this index once and writes it together with the reduced dataset. When the server later loads the binary snapshot, it reuses the embedded index instead of rebuilding the forward geocoder from scratch.
 
 - address records from stored houses
 - named streets
@@ -232,7 +234,7 @@ The backend builds an in-memory inverted index when the server starts. It does n
 
 Administrative area names are also attached to houses and streets in the search index. This allows a query with both an object name and a place name, for example a street and city, to be answered without scanning every object at query time.
 
-The server builds two forward-search indexes:
+The saved forward-geocoder data contains two search indexes:
 
 - a context index, where houses and streets also receive surrounding administrative names for full address queries
 - a primary-field index, where single plain-name queries use the object's own address/name fields first
@@ -263,13 +265,13 @@ The ranking is heuristic:
 - administrative areas are returned when the area name itself matches
 - for single-token queries, area or street matches must come from the object's own name, not only from a surrounding region
 
-Substring search and typo-tolerant fuzzy fallback are implemented for normalized search tokens. Selected Task 5 POI/natural queries are implemented through `/api/natural-geocode`: named POI in place, such as `Stuttgart Burger King`, nearest category to address, such as `Closest Park to Koenigstrasse 1 Stuttgart`, and product/service concept queries, such as `where can I buy nail polish remover near Koenigstrasse 1 Stuttgart`. The frontend exposes an optional checkbox for local Ollama intent parsing. When the checkbox is enabled, Ollama is tried first and the deterministic parser is still available if no valid intent is produced. Final results still come only from the PBF-derived indexes.
+Substring search and typo-tolerant fuzzy fallback are implemented for normalized search tokens. Selected Task 5 POI/natural queries are implemented through `/api/natural-geocode`: named POI in place, such as `Stuttgart Burger King`, nearest category to address, such as `Closest Park to Koenigstrasse 1 Stuttgart`, and product/service concept queries, such as `where can I buy nail polish remover near Koenigstrasse 1 Stuttgart`. The frontend exposes an optional checkbox for local Ollama intent parsing. When the checkbox is enabled, Ollama drafts and verifies strict JSON intent first. The backend then validates that intent, applies small deterministic corrections for known schema variants, obvious brand spellings such as `McDonalds`, `H&M`, and `C&A`, and clear category/product phrases such as `burger`, `Pommes`, or `print documents`. It does not keep a large brand table. Brand and chain queries are validated by searching the local PBF-derived POI index fields such as name, brand, operator, shop, amenity, craft, office, and tourism. Final results still come only from the PBF-derived indexes.
 
-Product/service queries use a small local concept graph plus product families. Ollama first drafts strict intent JSON, then verifies and corrects that JSON in a second local call. The backend validates the final concept and product family, applies deterministic product-family corrections for known terms, and maps the family to weighted OSM tags such as `amenity=pharmacy`, `shop=chemist`, `shop=bicycle`, or `shop=copyshop`. This returns likely real OSM places, not guaranteed product inventory. Result clustering, external geocoding services, and route planning are not used.
+Product/service queries use a small local concept graph plus product families. Ollama first drafts strict intent JSON, then verifies and corrects that JSON in two local verification passes before the backend uses the final intent. The backend validates the final concept and product family, applies deterministic product-family corrections for known terms, and maps the family to weighted OSM tags such as `amenity=pharmacy`, `shop=chemist`, `shop=bicycle`, or `shop=copyshop`. This returns likely real OSM places, not guaranteed product inventory. Result clustering, external geocoding services, and route planning are not used.
 
 Natural queries can use the current map view as their frame of reference. If a query contains an explicit place or address, the backend uses that address as the search origin. If the query has no usable place, the frontend sends the current map center as `lat` and `lon`, and the backend uses that point as the origin. The response includes `originSource` so this is visible: `address` means the typed place was used, `viewport` means the map center was used, and `none` means no valid origin was available. If Ollama invents an address that is not present in the user's text, the backend ignores that invented address and uses the supplied viewport center instead.
 
-When the server starts on Ubuntu/Linux, it can also start local Ollama automatically. If `OSM_AUTO_OLLAMA` is not disabled and no Ollama server is already listening on the configured local host and port, the backend starts `ollama serve`, warms the selected model, and stops only that managed Ollama process when the OSM server exits. If Ollama was already running before the OSM server started, the backend uses it but does not terminate it.
+When the server starts on Ubuntu/Linux, it can also start local Ollama automatically. If `OSM_AUTO_OLLAMA` is not disabled and no Ollama server is already listening on the configured local host and port, the backend starts `ollama serve`, warms the selected model, and stops only that managed Ollama process when the OSM server exits. If Ollama was already running before the OSM server started, the backend uses it but does not terminate it. The frontend also has a `Start Ollama Service` button under the geocoder. That button calls `/api/ollama/start`, clears the configured local Ollama port, starts `ollama serve`, warms the configured model, and reports the result in the browser.
 
 The `/api/stats` endpoint also exposes server-side index build metrics, including spatial-index build time, forward-index build time, posting-list counts, grid-cell counts, and an explicitly estimated forward-index memory value. The estimate is not reported as exact heap use; it is a coherent size estimate based on stored postings, token strings, and vector metadata.
 
@@ -297,7 +299,7 @@ A simple parser would store every OSM node coordinate first and then use that ta
 
 The compact approach:
 
-1. scan administrative boundary relations and addressed building relations, and remember their outer member ways
+1. scan administrative boundary relations and addressed building relations, and remember the boundary member ways needed for outer and inner rings
 2. scan named streets and collect endpoint nodes
 3. scan unnamed road candidates and recover short connectors and roundabouts that touch named streets
 4. scan useful ways and collect node IDs only from those ways
@@ -319,12 +321,13 @@ During parsing, the program prints phase-aware progress with elapsed time and ET
 - PBF scan phases use the compressed file byte offset reported by libosmium.
 - Administrative attribution uses the number of houses, streets, and admin areas processed.
 - Binary snapshot writing uses the current output-file position against the estimated snapshot size.
+- Binary snapshots include administrative ring metadata. Snapshots written by older builds must be regenerated from the PBF.
 
 On a real terminal, progress updates in place on the same line. When output is redirected to a file, progress is written as normal log lines so the log remains readable.
 
 The ETA is an estimate. It is reliable for long sequential scans, but CPU-heavy phases can speed up or slow down depending on geometry complexity.
 
-When starting the GUI/server from a binary snapshot, the server also shows progress while building spatial indexes and forward-geocoder indexes before it prints the localhost URL.
+When starting the GUI/server from a binary snapshot, the server shows progress while building the runtime spatial indexes before it prints the localhost URL. The forward-geocoder index is loaded from the snapshot and must already be present.
 
 ## 12. Binary Snapshots
 
@@ -346,7 +349,7 @@ The snapshot can later be loaded without reparsing:
   --server 8080
 ```
 
-The binary snapshot format is meant for the same platform and build style that created it. A snapshot written by the Ubuntu build should be loaded by the Ubuntu build.
+The binary snapshot format is meant for the same platform and build style that created it. A snapshot written by the Ubuntu build should be loaded by the Ubuntu build. Current snapshots include administrative ring metadata and the forward-geocoder index. Older snapshots must be regenerated from the PBF.
 
 ## 13. GUI
 
@@ -523,7 +526,7 @@ The console prints detailed phase metrics while the parser runs. These help with
 
 Important scan sections:
 
-- `Administrative Boundary Relation Scan`: scans OSM relations, keeps administrative boundary relations and addressed building relations, and records the outer member ways needed later.
+- `Administrative Boundary Relation Scan`: scans OSM relations, keeps administrative boundary relations and addressed building relations, and records the boundary member ways needed later.
 - `Address And Boundary Extraction`: builds house points and administrative boundary way geometry.
 - `Street Line Extraction`: builds street line geometry.
 - `Administrative Boundary Assembly`: builds administrative polygons from relation member ways.

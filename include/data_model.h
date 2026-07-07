@@ -111,9 +111,18 @@ struct AdminAreaRecord {
     FeatureSource source = FeatureSource::Way;
     uint32_t geometryOffset = 0;
     uint32_t geometrySize = 0;
+    uint32_t ringOffset = 0;
+    uint32_t ringSize = 0;
     uint32_t parentAreaOffset = 0;
     uint32_t parentAreaSize = 0;
     BoundingBox bbox;
+};
+
+struct AdminRingRecord {
+    uint32_t geometryOffset = 0;
+    uint32_t geometrySize = 0;
+    uint32_t adminAreaIndex = 0;
+    uint8_t role = 0;
 };
 
 struct PoiRecord {
@@ -236,6 +245,7 @@ struct OSMDataset {
     std::vector<uint32_t> adminParentAreaIndexes;
     std::vector<Coordinate> streetGeometry;
     std::vector<Coordinate> adminGeometry;
+    std::vector<AdminRingRecord> adminRings;
     ForwardGeocodeIndex forwardGeocodeIndex;
     DatasetStats stats;
     std::string selectedNameLanguage = "de";

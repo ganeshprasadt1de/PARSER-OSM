@@ -181,6 +181,11 @@
       line-height: 1.35;
     }
 
+    .result-button.selected {
+      background: #0f172a;
+      outline: 2px solid #facc15;
+    }
+
     #map {
       width: 100%;
       height: 100%;
@@ -257,6 +262,8 @@
             <button id="geocodeBtn" type="button">Search</button>
             <button id="clearGeocodeBtn" type="button">Clear</button>
           </div>
+          <button id="startOllamaBtn" type="button">Start Ollama Service</button>
+          <div id="ollamaStatus" class="warning"></div>
         </div>
         <div id="geocodeResult" class="stats">
           <div class="key">Query time</div><div class="value">-</div>
@@ -322,6 +329,8 @@
     const useLlmGeocode = document.getElementById("useLlmGeocode");
     const geocodeBtn = document.getElementById("geocodeBtn");
     const clearGeocodeBtn = document.getElementById("clearGeocodeBtn");
+    const startOllamaBtn = document.getElementById("startOllamaBtn");
+    const ollamaStatusEl = document.getElementById("ollamaStatus");
     const geocodeResultEl = document.getElementById("geocodeResult");
     const reverseResultEl = document.getElementById("reverseResult");
     const reverseEnabled = document.getElementById("reverseEnabled");
@@ -335,6 +344,7 @@
     let pipRequestId = 0;
     let viewportRequestId = 0;
     let viewportAbortController = null;
+    let geocodeResultEntries = [];
 
     function buildViewportQuery() {
       const bounds = map.getBounds();
@@ -831,8 +841,23 @@
       }).bindPopup(escapeHtml(geocodeResultLabel(result)));
     }
 
+    function setSelectedGeocodeResult(selectedIndex) {
+      for (const entry of geocodeResultEntries) {
+        if (entry.button) {
+          entry.button.classList.toggle("selected", entry.index === selectedIndex);
+        }
+        if (entry.layer && typeof entry.layer.setStyle === "function") {
+          entry.layer.setStyle(entry.index === selectedIndex ? entry.selectedStyle : entry.normalStyle);
+          if (entry.index === selectedIndex && typeof entry.layer.bringToFront === "function") {
+            entry.layer.bringToFront();
+          }
+        }
+      }
+    }
+
     async function drawGeocodeResult(data) {
       geocodeLayer.clearLayers();
+      geocodeResultEntries = [];
       const results = Array.isArray(data.results) ? data.results : [];
       const rows = [
         ["Query time", `${Number(data.queryTimeMs || 0).toFixed(3)} ms`],
@@ -847,20 +872,35 @@
       list.className = "result-list";
       const bounds = [];
 
-      for (const result of results) {
+      results.forEach((result, resultIndex) => {
         let layer = null;
+        let normalStyle = null;
+        let selectedStyle = null;
         if (result.type === "house") {
+          normalStyle = { radius: 8, color: "#111827", weight: 2, fillColor: "#d46a2f", fillOpacity: 0.95 };
+          selectedStyle = { radius: 11, color: "#facc15", weight: 4, fillColor: "#d46a2f", fillOpacity: 1 };
           layer = addGeocodePoint(result, 8, "#d46a2f");
         } else if (result.type === "poi") {
+          normalStyle = { radius: 8, color: "#111827", weight: 2, fillColor: "#7c3aed", fillOpacity: 0.95 };
+          selectedStyle = { radius: 11, color: "#facc15", weight: 4, fillColor: "#7c3aed", fillOpacity: 1 };
           layer = addGeocodePoint(result, 8, "#7c3aed");
         } else if (result.type === "street" && result.street && Array.isArray(result.street.geometry) && result.street.geometry.length >= 2) {
-          layer = L.polyline(result.street.geometry, {
+          normalStyle = {
             pane: "geocodePane",
             color: "#111827",
             weight: 6,
             opacity: 0.9
-          }).bindPopup(escapeHtml(geocodeResultLabel(result)));
+          };
+          selectedStyle = {
+            pane: "geocodePane",
+            color: "#facc15",
+            weight: 9,
+            opacity: 1
+          };
+          layer = L.polyline(result.street.geometry, normalStyle).bindPopup(escapeHtml(geocodeResultLabel(result)));
         } else if (result.type === "admin_area") {
+          normalStyle = { radius: 7, color: "#111827", weight: 2, fillColor: "#16826f", fillOpacity: 0.95 };
+          selectedStyle = { radius: 10, color: "#facc15", weight: 4, fillColor: "#16826f", fillOpacity: 1 };
           layer = addGeocodePoint(result, 7, "#16826f");
           if (result.adminArea && Number.isInteger(Number(result.adminArea.index))) {
             fetchJson(`/api/admin-area?index=${Number(result.adminArea.index)}&maxPoints=1600`)
@@ -894,12 +934,14 @@
         item.className = "result-button";
         item.textContent = geocodeResultLabel(result);
         item.addEventListener("click", () => {
+          setSelectedGeocodeResult(resultIndex);
           if (Number.isFinite(Number(result.lat)) && Number.isFinite(Number(result.lon))) {
             map.setView([result.lat, result.lon], Math.max(map.getZoom(), 15));
           }
         });
         list.appendChild(item);
-      }
+        geocodeResultEntries.push({ index: resultIndex, layer, button: item, normalStyle, selectedStyle });
+      });
 
       geocodeResultEl.appendChild(list);
       if (bounds.length > 0) {
@@ -924,11 +966,32 @@
       if (useLlmGeocode.checked) {
         query.set("useLlm", "1");
         const center = map.getCenter();
+        const bounds = map.getBounds();
         query.set("lat", center.lat.toFixed(8));
         query.set("lon", center.lng.toFixed(8));
+        query.set("minLat", bounds.getSouth().toFixed(8));
+        query.set("maxLat", bounds.getNorth().toFixed(8));
+        query.set("minLon", bounds.getWest().toFixed(8));
+        query.set("maxLon", bounds.getEast().toFixed(8));
       }
       const data = await fetchJson(`${endpoint}?${query.toString()}`);
       await drawGeocodeResult(data);
+    }
+
+    async function startOllamaService() {
+      startOllamaBtn.disabled = true;
+      ollamaStatusEl.textContent = "Starting Ollama service...";
+      try {
+        const data = await fetchJson("/api/ollama/start");
+        const warmed = data.warmed ? "model warmed" : "model not warmed";
+        const killed = Number(data.killedPortProcesses || 0);
+        ollamaStatusEl.textContent =
+          `Ollama ready on ${data.host}:${data.port} (${warmed}, cleared ${killed} port process${killed === 1 ? "" : "es"}).`;
+      } catch (error) {
+        ollamaStatusEl.textContent = `Ollama start failed: ${error.message}`;
+      } finally {
+        startOllamaBtn.disabled = false;
+      }
     }
 
     function clearGeocodeResult() {
@@ -1090,6 +1153,9 @@
       }
     });
     clearGeocodeBtn.addEventListener("click", clearGeocodeResult);
+    startOllamaBtn.addEventListener("click", () => {
+      startOllamaService();
+    });
     reverseEnabled.addEventListener("change", () => {
       if (!isReverseEnabled()) {
         clearReverseResult();

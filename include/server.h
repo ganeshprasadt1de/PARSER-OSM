@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -70,11 +71,14 @@ private:
     void configureRoutes(httplib::Server& server);
     void serverLoop();
     ServerResponse handleRequest(const std::string& path,
-                                 const std::unordered_map<std::string, std::string>& params) const;
+                                 const std::unordered_map<std::string, std::string>& params);
     void buildSpatialIndexes();
     void buildGeocodeIndex();
     void startManagedOllama();
     void stopManagedOllama();
+    bool launchManagedOllama(std::string* errorMessage);
+    ServerResponse handleOllamaStartRequest();
+    std::mutex ollamaMutex_;
 
     static ServerResponse httpResponse(int statusCode,
                                        const std::string& contentType,

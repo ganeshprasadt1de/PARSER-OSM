@@ -1,9 +1,11 @@
 void addBuildingRelationHouses(const std::vector<BuildingRelationDefinition>& relationDefinitions,
-                               const std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry,
+                               const std::vector<RelationWaySpan>& relationWaySpans,
+                               const std::vector<Coordinate>& relationWayCoords,
                                OSMDataset& data,
                                StringInterner& interner) {
     for (const BuildingRelationDefinition& relation : relationDefinitions) {
-        const std::vector<std::vector<Coordinate>> rings = buildClosedRings(relation.outerWayIds, relationWayGeometry);
+        const std::vector<std::vector<Coordinate>> rings =
+            buildClosedRings(relation.outerWayIds, relationWaySpans, relationWayCoords);
         if (rings.empty()) {
             continue;
         }
@@ -32,6 +34,40 @@ void addBuildingRelationHouses(const std::vector<BuildingRelationDefinition>& re
             data.stats.housesMissingHouseNumber += 1;
         }
     }
+}
+
+bool pointInRingForAssembly(const Coordinate& point, const std::vector<Coordinate>& ring) {
+    if (ring.size() < 4) {
+        return false;
+    }
+    std::vector<uint32_t> edges;
+    edges.reserve(ring.size());
+    for (uint32_t i = 0; i < ring.size(); ++i) {
+        edges.push_back(i);
+    }
+    return pointInPolygon(point, ring, 0, checkedU32(ring.size(), "assembly ring size"), edges);
+}
+
+Coordinate firstUsableRingPoint(const std::vector<Coordinate>& ring) {
+    if (ring.empty()) {
+        return Coordinate{};
+    }
+    return ring[ring.size() / 2];
+}
+
+void appendAdminRing(OSMDataset& data,
+                     uint32_t areaIndex,
+                     const std::vector<Coordinate>& ring,
+                     uint8_t role) {
+    const uint32_t offset = checkedU32(data.adminGeometry.size(), "admin ring geometry offset");
+    data.adminGeometry.insert(data.adminGeometry.end(), ring.begin(), ring.end());
+
+    AdminRingRecord record;
+    record.geometryOffset = offset;
+    record.geometrySize = checkedU32(ring.size(), "admin ring geometry size");
+    record.adminAreaIndex = areaIndex;
+    record.role = role;
+    data.adminRings.push_back(record);
 }
 
 Parser::Parser() : Parser(Options{}) {}
@@ -179,8 +215,9 @@ void Parser::parsePbf(const std::string& pbfPath) {
     std::cout << "  Scan time:                   " << data_.stats.relationScanSeconds << " s\n";
 
     StringInterner interner;
-    std::unordered_map<uint64_t, std::vector<Coordinate>> relationWayGeometry;
-    relationWayGeometry.reserve(relationIndexByWayId.size());
+    std::vector<RelationWaySpan> relationWaySpans;
+    std::vector<Coordinate> relationWayCoords;
+    relationWaySpans.reserve(relationIndexByWayId.size());
 
     const auto extractionStart = std::chrono::steady_clock::now();
     CompactExtractionReport extractionReport =
@@ -189,8 +226,13 @@ void Parser::parsePbf(const std::string& pbfPath) {
                                             interner,
                                             options_,
                                             relationIndexByWayId,
-                                            relationWayGeometry);
-    addBuildingRelationHouses(buildingRelationDefinitions, relationWayGeometry, data_, interner);
+                                            relationWaySpans,
+                                            relationWayCoords);
+    std::sort(relationWaySpans.begin(), relationWaySpans.end(), [](const RelationWaySpan& left,
+                                                                   const RelationWaySpan& right) {
+        return left.wayId < right.wayId;
+    });
+    addBuildingRelationHouses(buildingRelationDefinitions, relationWaySpans, relationWayCoords, data_, interner);
     const auto extractionEnd = std::chrono::steady_clock::now();
     const double measuredExtractionSeconds =
         std::chrono::duration<double>(extractionEnd - extractionStart).count();
@@ -232,14 +274,52 @@ void Parser::parsePbf(const std::string& pbfPath) {
 
     const auto relationAssemblyStart = std::chrono::steady_clock::now();
     for (const AdminRelationDefinition& relation : relationDefinitions) {
-        const std::vector<std::vector<Coordinate>> rings = buildClosedRings(relation, relationWayGeometry);
-        for (const std::vector<Coordinate>& ring : rings) {
-            if (ring.size() < 4) {
+        const std::vector<std::vector<Coordinate>> outerRings =
+            buildClosedRings(relation.outerWayIds, relationWaySpans, relationWayCoords);
+        const std::vector<std::vector<Coordinate>> innerRings =
+            buildClosedRings(relation.innerWayIds, relationWaySpans, relationWayCoords);
+        std::vector<BoundingBox> outerBboxes;
+        outerBboxes.reserve(outerRings.size());
+        for (const std::vector<Coordinate>& outerRing : outerRings) {
+            outerBboxes.push_back(computeBoundingBox(outerRing));
+        }
+
+        std::vector<std::vector<size_t>> assignedInnerRings(outerRings.size());
+        for (size_t innerIndex = 0; innerIndex < innerRings.size(); ++innerIndex) {
+            const std::vector<Coordinate>& innerRing = innerRings[innerIndex];
+            if (innerRing.size() < 4) {
                 continue;
             }
 
-            const uint32_t offset = static_cast<uint32_t>(data_.adminGeometry.size());
-            data_.adminGeometry.insert(data_.adminGeometry.end(), ring.begin(), ring.end());
+            const Coordinate probe = firstUsableRingPoint(innerRing);
+            size_t bestOuterIndex = outerRings.size();
+            double bestAreaScore = std::numeric_limits<double>::max();
+            for (size_t outerIndex = 0; outerIndex < outerRings.size(); ++outerIndex) {
+                if (outerRings[outerIndex].size() < 4 || !outerBboxes[outerIndex].contains(probe)) {
+                    continue;
+                }
+                if (!pointInRingForAssembly(probe, outerRings[outerIndex])) {
+                    continue;
+                }
+                const double score = bboxAreaScore(outerBboxes[outerIndex]);
+                if (score < bestAreaScore) {
+                    bestAreaScore = score;
+                    bestOuterIndex = outerIndex;
+                }
+            }
+            if (bestOuterIndex < outerRings.size()) {
+                assignedInnerRings[bestOuterIndex].push_back(innerIndex);
+            }
+        }
+
+        for (size_t outerIndex = 0; outerIndex < outerRings.size(); ++outerIndex) {
+            const std::vector<Coordinate>& outerRing = outerRings[outerIndex];
+            if (outerRing.size() < 4) {
+                continue;
+            }
+
+            const uint32_t offset = checkedU32(data_.adminGeometry.size(), "admin geometry offset");
+            data_.adminGeometry.insert(data_.adminGeometry.end(), outerRing.begin(), outerRing.end());
 
             AdminAreaRecord area;
             area.osmId = relation.relationId;
@@ -248,10 +328,26 @@ void Parser::parsePbf(const std::string& pbfPath) {
             area.adminLevel = relation.adminLevel;
             area.source = FeatureSource::Relation;
             area.geometryOffset = offset;
-            area.geometrySize = static_cast<uint32_t>(ring.size());
-            area.bbox = computeBoundingBox(ring);
+            area.geometrySize = checkedU32(outerRing.size(), "admin geometry size");
+            area.ringOffset = checkedU32(data_.adminRings.size(), "admin ring offset");
+            area.ringSize = 0;
+            area.bbox = outerBboxes[outerIndex];
 
             data_.adminAreas.push_back(area);
+            const uint32_t areaIndex = checkedU32(data_.adminAreas.size() - 1, "admin area index");
+            AdminRingRecord outerRecord;
+            outerRecord.geometryOffset = offset;
+            outerRecord.geometrySize = checkedU32(outerRing.size(), "admin ring geometry size");
+            outerRecord.adminAreaIndex = areaIndex;
+            outerRecord.role = 0;
+            data_.adminRings.push_back(outerRecord);
+            data_.adminAreas[areaIndex].ringSize += 1;
+
+            for (size_t innerIndex : assignedInnerRings[outerIndex]) {
+                appendAdminRing(data_, areaIndex, innerRings[innerIndex], 1);
+                data_.adminAreas[areaIndex].ringSize += 1;
+            }
+
             data_.stats.adminAreasFromRelations += 1;
         }
     }
@@ -265,11 +361,15 @@ void Parser::parsePbf(const std::string& pbfPath) {
 
     data_.stats.adminAreasTotal = data_.adminAreas.size();
 
-    std::unordered_map<uint64_t, std::vector<Coordinate>>().swap(relationWayGeometry);
+    std::vector<RelationWaySpan>().swap(relationWaySpans);
+    std::vector<Coordinate>().swap(relationWayCoords);
     std::vector<AdminRelationDefinition>().swap(relationDefinitions);
     std::vector<BuildingRelationDefinition>().swap(buildingRelationDefinitions);
     std::unordered_map<uint64_t, size_t>().swap(relationIndexByWayId);
     updatePeakRss(getProcessMemorySnapshot(), peakRssMB);
+
+    data_.strings = interner.releaseValues();
+    interner.clearIndex();
 
     StreetConnectionStats connectionStats;
     if (options_.connectStreets) {
@@ -309,7 +409,6 @@ void Parser::parsePbf(const std::string& pbfPath) {
     std::cout << "  Lookup time:                 " << std::fixed << std::setprecision(3)
               << roundedSeconds(data_.stats.adminAttributionSeconds) << " s\n";
 
-    data_.strings = interner.releaseValues();
     data_.stats.housesTotal = data_.houses.size();
     data_.stats.streetsTotal = data_.streets.size();
     data_.stats.adminAreasTotal = data_.adminAreas.size();
@@ -431,6 +530,8 @@ bool Parser::writeBinarySnapshot(const std::string& outputPath) {
     updateProgress();
     writePlainVector(out, data_.adminGeometry);
     updateProgress();
+    writePlainVector(out, data_.adminRings);
+    updateProgress();
     out.write(reinterpret_cast<const char*>(&data_.stats), sizeof(data_.stats));
     updateProgress();
     writeForwardGeocodeIndex(out, data_.forwardGeocodeIndex);
@@ -472,7 +573,8 @@ bool Parser::loadBinarySnapshot(const std::string& inputPath) {
         !readPlainVector(in, data_.poiAdminAreaIndexes) ||
         !readPlainVector(in, data_.adminParentAreaIndexes) ||
         !readPlainVector(in, data_.streetGeometry) ||
-        !readPlainVector(in, data_.adminGeometry)) {
+        !readPlainVector(in, data_.adminGeometry) ||
+        !readPlainVector(in, data_.adminRings)) {
         return false;
     }
 
@@ -566,17 +668,39 @@ bool Parser::exportGeoJson(const std::string& outputPath,
         out << "\"name\":\"" << jsonEscape(data_.resolve(area.name)) << "\",";
         out << "\"admin_level\":" << static_cast<int>(area.adminLevel) << ",";
         out << "\"source\":\"" << featureSourceToString(area.source) << "\"},";
-        out << "\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[";
+        out << "\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[";
 
-        for (uint32_t j = 0; j < area.geometrySize; ++j) {
-            if (j > 0) {
-                out << ",";
+        const auto writeRing = [&](uint32_t offset, uint32_t size) {
+            out << "[";
+            const uint32_t available = offset < data_.adminGeometry.size()
+                ? std::min<uint32_t>(size,
+                      checkedU32(data_.adminGeometry.size() - offset, "admin geometry available size"))
+                : 0;
+            for (uint32_t j = 0; j < available; ++j) {
+                if (j > 0) {
+                    out << ",";
+                }
+                const Coordinate& point = data_.adminGeometry[offset + j];
+                out << "[" << std::setprecision(10) << longitudeOf(point) << "," << latitudeOf(point) << "]";
             }
-            const Coordinate& point = data_.adminGeometry[area.geometryOffset + j];
-            out << "[" << std::setprecision(10) << longitudeOf(point) << "," << latitudeOf(point) << "]";
+            out << "]";
+        };
+
+        writeRing(area.geometryOffset, area.geometrySize);
+        const uint32_t ringCount = area.ringOffset < data_.adminRings.size()
+            ? std::min<uint32_t>(area.ringSize,
+                  checkedU32(data_.adminRings.size() - area.ringOffset, "admin ring available size"))
+            : 0;
+        for (uint32_t j = 0; j < ringCount; ++j) {
+            const AdminRingRecord& ring = data_.adminRings[area.ringOffset + j];
+            if (ring.adminAreaIndex != i || ring.role != 1) {
+                continue;
+            }
+            out << ",";
+            writeRing(ring.geometryOffset, ring.geometrySize);
         }
 
-        out << "]]}}";
+        out << "]}}";
     }
 
     out << "\n  ]\n}\n";
@@ -600,6 +724,7 @@ double Parser::estimateDatasetBytes() const {
     bytes += static_cast<uint64_t>(data_.adminParentAreaIndexes.capacity()) * sizeof(uint32_t);
     bytes += static_cast<uint64_t>(data_.streetGeometry.capacity()) * sizeof(Coordinate);
     bytes += static_cast<uint64_t>(data_.adminGeometry.capacity()) * sizeof(Coordinate);
+    bytes += static_cast<uint64_t>(data_.adminRings.capacity()) * sizeof(AdminRingRecord);
     const auto addPostingBytes = [](const std::vector<GeocodePostingList>& lists) {
         uint64_t localBytes = static_cast<uint64_t>(lists.capacity()) * sizeof(GeocodePostingList);
         for (const GeocodePostingList& list : lists) {

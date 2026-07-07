@@ -141,8 +141,8 @@ void storeMergedStreet(const OSMDataset& oldData,
     merged.osmId = minOsmId;
     merged.name = first.name;
     merged.highwayType = first.highwayType;
-    merged.geometryOffset = static_cast<uint32_t>(newGeometry.size());
-    merged.geometrySize = static_cast<uint32_t>(geometry.size());
+    merged.geometryOffset = checkedU32(newGeometry.size(), "merged street geometry offset");
+    merged.geometrySize = checkedU32(geometry.size(), "merged street geometry size");
     merged.bbox = computeBoundingBox(geometry);
 
     newGeometry.insert(newGeometry.end(), geometry.begin(), geometry.end());
@@ -159,7 +159,7 @@ void copyStreetRecord(const OSMDataset& oldData,
     }
 
     StreetRecord copy = oldStreet;
-    copy.geometryOffset = static_cast<uint32_t>(newGeometry.size());
+    copy.geometryOffset = checkedU32(newGeometry.size(), "copied street geometry offset");
     newGeometry.insert(newGeometry.end(),
                        oldData.streetGeometry.begin() + oldStreet.geometryOffset,
                        oldData.streetGeometry.begin() + oldStreet.geometryOffset + oldStreet.geometrySize);
@@ -324,7 +324,7 @@ StreetConnectionStats connectStreetSegments(OSMDataset& data) {
             continue;
         }
 
-        const uint32_t streetIndex = static_cast<uint32_t>(i);
+        const uint32_t streetIndex = checkedU32(i, "street record index");
         endpoints.push_back(EndpointRecord{street.name, street.highwayType, keyOf(first), streetIndex});
         endpoints.push_back(EndpointRecord{street.name, street.highwayType, keyOf(last), streetIndex});
     }

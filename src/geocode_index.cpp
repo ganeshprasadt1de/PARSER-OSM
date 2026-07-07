@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -21,6 +22,13 @@ namespace {
 
 constexpr size_t kMinSubstringTokenLength = 3;
 constexpr size_t kMaxFuzzyVocabularyScan = 250000;
+
+uint32_t checkedU32(size_t value, const char* field) {
+    if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::runtime_error(std::string(field) + " exceeds uint32_t range");
+    }
+    return static_cast<uint32_t>(value);
+}
 
 bool stdoutIsTerminal() {
 #ifdef _WIN32
@@ -232,7 +240,7 @@ void addTokensToIndex(std::unordered_map<std::string, std::vector<GeocodeRef>>& 
     }
 }
 
-void finalizePostingMap(const std::unordered_map<std::string, std::vector<GeocodeRef>>& source,
+void finalizePostingMap(std::unordered_map<std::string, std::vector<GeocodeRef>>& source,
                         std::vector<GeocodePostingList>& target,
                         uint64_t& postingRefs,
                         uint64_t& largestPostingList) {
@@ -241,14 +249,15 @@ void finalizePostingMap(const std::unordered_map<std::string, std::vector<Geocod
     postingRefs = 0;
     largestPostingList = 0;
 
-    for (const auto& entry : source) {
+    for (auto& entry : source) {
         GeocodePostingList list;
-        list.token = entry.first;
-        list.refs = entry.second;
+        list.token = std::move(entry.first);
+        list.refs = std::move(entry.second);
         std::sort(list.refs.begin(), list.refs.end(), geocodeRefLess);
         list.refs.erase(std::unique(list.refs.begin(), list.refs.end(), [](const GeocodeRef& left, const GeocodeRef& right) {
             return left.type == right.type && left.index == right.index;
         }), list.refs.end());
+        list.refs.shrink_to_fit();
         postingRefs += list.refs.size();
         largestPostingList = std::max<uint64_t>(largestPostingList, list.refs.size());
         target.push_back(std::move(list));
@@ -257,21 +266,40 @@ void finalizePostingMap(const std::unordered_map<std::string, std::vector<Geocod
     std::sort(target.begin(), target.end(), [](const GeocodePostingList& left, const GeocodePostingList& right) {
         return left.token < right.token;
     });
+    std::unordered_map<std::string, std::vector<GeocodeRef>>().swap(source);
+}
+
+void mergeUniqueTokens(const std::vector<GeocodePostingList>& left,
+                       const std::vector<GeocodePostingList>& right,
+                       std::vector<std::string>& vocabulary) {
+    vocabulary.clear();
+    vocabulary.reserve(left.size() + right.size());
+    size_t leftIndex = 0;
+    size_t rightIndex = 0;
+    while (leftIndex < left.size() || rightIndex < right.size()) {
+        const std::string* token = nullptr;
+        if (rightIndex >= right.size() ||
+            (leftIndex < left.size() && left[leftIndex].token <= right[rightIndex].token)) {
+            token = &left[leftIndex].token;
+            ++leftIndex;
+        } else {
+            token = &right[rightIndex].token;
+            ++rightIndex;
+        }
+        if (vocabulary.empty() || vocabulary.back() != *token) {
+            vocabulary.push_back(*token);
+        }
+        while (leftIndex < left.size() && left[leftIndex].token == *token) {
+            ++leftIndex;
+        }
+        while (rightIndex < right.size() && right[rightIndex].token == *token) {
+            ++rightIndex;
+        }
+    }
 }
 
 void buildVocabularyAndSuffixArray(ForwardGeocodeIndex& index, bool showProgress) {
-    std::unordered_set<std::string> seen;
-    seen.reserve(index.context.size() + index.primary.size());
-
-    for (const GeocodePostingList& list : index.context) {
-        seen.insert(list.token);
-    }
-    for (const GeocodePostingList& list : index.primary) {
-        seen.insert(list.token);
-    }
-
-    index.vocabulary.assign(seen.begin(), seen.end());
-    std::sort(index.vocabulary.begin(), index.vocabulary.end());
+    mergeUniqueTokens(index.context, index.primary, index.vocabulary);
 
     uint64_t suffixCount = 0;
     for (const std::string& token : index.vocabulary) {
@@ -290,10 +318,9 @@ void buildVocabularyAndSuffixArray(ForwardGeocodeIndex& index, bool showProgress
             continue;
         }
         for (size_t offset = 0; offset < token.size(); ++offset) {
-            if (tokenIndex <= std::numeric_limits<uint32_t>::max() &&
-                offset <= std::numeric_limits<uint16_t>::max()) {
+            if (offset <= std::numeric_limits<uint16_t>::max()) {
                 index.suffixArray.push_back(GeocodeSuffixEntry{
-                    static_cast<uint32_t>(tokenIndex),
+                    checkedU32(tokenIndex, "geocode suffix token index"),
                     static_cast<uint16_t>(offset)
                 });
             }
@@ -468,7 +495,7 @@ void buildForwardGeocodeIndex(const OSMDataset& data,
             appendTokensFromText(primaryTokens, data.resolve(house.streetName));
             appendTokensFromText(primaryTokens, data.resolve(house.houseNumber));
             appendTokensFromText(primaryTokens, data.resolve(house.postcode));
-            addEntry(kGeocodeHouse, static_cast<uint32_t>(i), std::move(tokens), std::move(primaryTokens));
+            addEntry(kGeocodeHouse, checkedU32(i, "house geocode record index"), std::move(tokens), std::move(primaryTokens));
         }
         ++processed;
         updateProgress();
@@ -482,7 +509,7 @@ void buildForwardGeocodeIndex(const OSMDataset& data,
             appendSearchContextAdminTokens(tokens, data, data.streetAdminAreaIndexes, street.adminAreaOffset, street.adminAreaSize);
             std::vector<std::string> primaryTokens;
             appendTokensFromText(primaryTokens, data.resolve(street.name));
-            addEntry(kGeocodeStreet, static_cast<uint32_t>(i), std::move(tokens), std::move(primaryTokens));
+            addEntry(kGeocodeStreet, checkedU32(i, "street geocode record index"), std::move(tokens), std::move(primaryTokens));
         }
         ++processed;
         updateProgress();
@@ -502,7 +529,7 @@ void buildForwardGeocodeIndex(const OSMDataset& data,
         appendTokensFromText(primaryTokens, data.resolve(poi.brand));
         appendTokensFromText(primaryTokens, data.resolve(poi.category));
         appendTokensFromText(primaryTokens, data.resolve(poi.tagValue));
-        addEntry(kGeocodePoi, static_cast<uint32_t>(i), std::move(tokens), std::move(primaryTokens));
+        addEntry(kGeocodePoi, checkedU32(i, "poi geocode record index"), std::move(tokens), std::move(primaryTokens));
 
         ++processed;
         updateProgress();
@@ -516,7 +543,7 @@ void buildForwardGeocodeIndex(const OSMDataset& data,
             appendSearchContextAdminTokens(tokens, data, data.adminParentAreaIndexes, area.parentAreaOffset, area.parentAreaSize);
             std::vector<std::string> primaryTokens;
             appendTokensFromText(primaryTokens, data.resolve(area.name));
-            addEntry(kGeocodeAdmin, static_cast<uint32_t>(i), std::move(tokens), std::move(primaryTokens));
+            addEntry(kGeocodeAdmin, checkedU32(i, "admin geocode record index"), std::move(tokens), std::move(primaryTokens));
         }
         ++processed;
         updateProgress();

@@ -1,10 +1,18 @@
-constexpr char kBinaryMagic[8] = {'O', 'S', 'M', 'D', 'B', '0', '0', '6'};
+constexpr char kBinaryMagic[8] = {'O', 'S', 'M', 'D', 'B', '0', '0', '7'};
+
+uint32_t checkedU32(size_t value, const char* field) {
+    if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::runtime_error(std::string(field) + " exceeds uint32_t range");
+    }
+    return static_cast<uint32_t>(value);
+}
 
 struct AdminRelationDefinition {
     uint64_t relationId = 0;
     std::string name;
     uint8_t adminLevel = 0;
     std::vector<uint64_t> outerWayIds;
+    std::vector<uint64_t> innerWayIds;
 };
 
 struct BuildingRelationDefinition {
@@ -15,6 +23,12 @@ struct BuildingRelationDefinition {
     std::string city;
     std::string country;
     std::vector<uint64_t> outerWayIds;
+};
+
+struct RelationWaySpan {
+    uint64_t wayId = 0;
+    uint32_t offset = 0;
+    uint32_t size = 0;
 };
 
 struct ProcessMemorySnapshot {
@@ -230,6 +244,10 @@ public:
 
     std::vector<std::string> releaseValues() {
         return std::move(values_);
+    }
+
+    void clearIndex() {
+        std::unordered_map<std::string, StringRef>().swap(index_);
     }
 
 private:

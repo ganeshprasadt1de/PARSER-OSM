@@ -20,11 +20,14 @@ public:
             definition.relationId = static_cast<uint64_t>(relation.id());
             definition.adminLevel = adminLevel;
             definition.name = getLocalizedTag(relation.tags(), "name", language_);
-            collectOuterWayIds(relation, definition.outerWayIds);
+            collectAdminWayIds(relation, definition.outerWayIds, definition.innerWayIds);
             if (!definition.outerWayIds.empty()) {
                 const size_t relationIndex = relationDefinitions_.size();
                 relationDefinitions_.push_back(std::move(definition));
                 for (uint64_t wayId : relationDefinitions_.back().outerWayIds) {
+                    relationIndexByWayId_.emplace(wayId, relationIndex);
+                }
+                for (uint64_t wayId : relationDefinitions_.back().innerWayIds) {
                     relationIndexByWayId_.emplace(wayId, relationIndex);
                 }
             }
@@ -66,6 +69,26 @@ private:
             }
 
             outerWayIds.push_back(static_cast<uint64_t>(member.ref()));
+        }
+    }
+
+    static void collectAdminWayIds(const osmium::Relation& relation,
+                                   std::vector<uint64_t>& outerWayIds,
+                                   std::vector<uint64_t>& innerWayIds) {
+        for (const auto& member : relation.members()) {
+            if (member.type() != osmium::item_type::way) {
+                continue;
+            }
+
+            const char* role = member.role();
+            if (role == nullptr) {
+                continue;
+            }
+            if (std::string(role) == "outer") {
+                outerWayIds.push_back(static_cast<uint64_t>(member.ref()));
+            } else if (std::string(role) == "inner") {
+                innerWayIds.push_back(static_cast<uint64_t>(member.ref()));
+            }
         }
     }
 
@@ -167,7 +190,8 @@ void storeWayRecords(const osmium::Way& way,
                      OSMDataset& data,
                      StringInterner& interner,
                      const Parser::Options& options,
-                     std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry) {
+                     std::vector<RelationWaySpan>& relationWaySpans,
+                     std::vector<Coordinate>& relationWayCoords) {
     if (geometry.empty()) {
         return;
     }
@@ -175,7 +199,12 @@ void storeWayRecords(const osmium::Way& way,
     const uint64_t wayId = static_cast<uint64_t>(way.id());
 
     if (relevance.neededForRelation) {
-        relationWayGeometry[wayId] = geometry;
+        RelationWaySpan span;
+        span.wayId = wayId;
+        span.offset = checkedU32(relationWayCoords.size(), "relation way geometry offset");
+        span.size = checkedU32(geometry.size(), "relation way geometry size");
+        relationWayCoords.insert(relationWayCoords.end(), geometry.begin(), geometry.end());
+        relationWaySpans.push_back(span);
     }
 
     if (relevance.houseWay) {
@@ -200,7 +229,7 @@ void storeWayRecords(const osmium::Way& way,
     }
 
     if (relevance.streetWay && geometry.size() >= 2) {
-        const uint32_t offset = static_cast<uint32_t>(data.streetGeometry.size());
+        const uint32_t offset = checkedU32(data.streetGeometry.size(), "street geometry offset");
         data.streetGeometry.insert(data.streetGeometry.end(), geometry.begin(), geometry.end());
 
         StreetRecord street;
@@ -208,7 +237,7 @@ void storeWayRecords(const osmium::Way& way,
         street.name = interner.intern(getStreetDisplayName(way.tags(), options.nameLanguage));
         street.highwayType = interner.intern(getTagValue(way.tags(), "highway"));
         street.geometryOffset = offset;
-        street.geometrySize = static_cast<uint32_t>(geometry.size());
+        street.geometrySize = checkedU32(geometry.size(), "street geometry size");
         street.bbox = computeBoundingBox(geometry);
 
         data.streets.push_back(street);
@@ -217,7 +246,7 @@ void storeWayRecords(const osmium::Way& way,
     if (relevance.adminWay &&
         geometry.size() >= 4 &&
         coordinatesEqual(geometry.front(), geometry.back())) {
-        const uint32_t offset = static_cast<uint32_t>(data.adminGeometry.size());
+        const uint32_t offset = checkedU32(data.adminGeometry.size(), "admin geometry offset");
         data.adminGeometry.insert(data.adminGeometry.end(), geometry.begin(), geometry.end());
 
         AdminAreaRecord area;
@@ -227,10 +256,18 @@ void storeWayRecords(const osmium::Way& way,
         area.adminLevel = relevance.adminLevel;
         area.source = FeatureSource::Way;
         area.geometryOffset = offset;
-        area.geometrySize = static_cast<uint32_t>(geometry.size());
+        area.geometrySize = checkedU32(geometry.size(), "admin geometry size");
+        area.ringOffset = checkedU32(data.adminRings.size(), "admin ring offset");
+        area.ringSize = 1;
         area.bbox = computeBoundingBox(geometry);
 
         data.adminAreas.push_back(area);
+        AdminRingRecord ring;
+        ring.geometryOffset = offset;
+        ring.geometrySize = checkedU32(geometry.size(), "admin ring geometry size");
+        ring.adminAreaIndex = checkedU32(data.adminAreas.size() - 1, "admin ring area index");
+        ring.role = 0;
+        data.adminRings.push_back(ring);
         data.stats.adminAreasFromWays += 1;
     }
 
@@ -407,7 +444,7 @@ private:
 
         if (neededCursor_ < ids.size() && ids[neededCursor_] == nodeId) {
             neededNodes_.coordinates()[neededCursor_] = coordinate;
-            neededNodes_.foundFlags()[neededCursor_] = 1;
+            neededNodes_.markFound(neededCursor_);
         }
     }
 
@@ -432,7 +469,8 @@ public:
                            const std::vector<uint64_t>& recoveredUnnamedStreetWayIds,
                            ExtractionPass pass,
                            const NeededNodeStore& neededNodes,
-                           std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry)
+                           std::vector<RelationWaySpan>& relationWaySpans,
+                           std::vector<Coordinate>& relationWayCoords)
         : data_(data),
           interner_(interner),
           options_(options),
@@ -440,7 +478,8 @@ public:
           recoveredUnnamedStreetWayIds_(recoveredUnnamedStreetWayIds),
           pass_(pass),
           neededNodes_(neededNodes),
-          relationWayGeometry_(relationWayGeometry) {}
+          relationWaySpans_(relationWaySpans),
+          relationWayCoords_(relationWayCoords) {}
 
     void way(const osmium::Way& way) {
         const WayRelevance relevance = classifyWay(way,
@@ -452,7 +491,7 @@ public:
         }
 
         const std::vector<Coordinate> geometry = extractWayGeometryFromNeededNodes(way, neededNodes_);
-        storeWayRecords(way, geometry, relevance, data_, interner_, options_, relationWayGeometry_);
+        storeWayRecords(way, geometry, relevance, data_, interner_, options_, relationWaySpans_, relationWayCoords_);
     }
 
 private:
@@ -463,7 +502,8 @@ private:
     const std::vector<uint64_t>& recoveredUnnamedStreetWayIds_;
     ExtractionPass pass_;
     const NeededNodeStore& neededNodes_;
-    std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry_;
+    std::vector<RelationWaySpan>& relationWaySpans_;
+    std::vector<Coordinate>& relationWayCoords_;
 };
 
 struct CompactExtractionPassStats {
@@ -531,7 +571,8 @@ CompactExtractionPassStats runCompactExtractionPass(
     ExtractionPass pass,
     bool storeHouseNodes,
     bool countScannedPrimitives,
-    std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry,
+    std::vector<RelationWaySpan>& relationWaySpans,
+    std::vector<Coordinate>& relationWayCoords,
     size_t phaseIndex,
     size_t phaseCount,
     const std::string& phaseLabel) {
@@ -590,7 +631,8 @@ CompactExtractionPassStats runCompactExtractionPass(
                                        recoveredUnnamedStreetWayIds,
                                        pass,
                                        neededNodes,
-                                       relationWayGeometry);
+                                       relationWaySpans,
+                                       relationWayCoords);
         ProgressReporter progress(phaseLabel + " way build", phaseIndex + 2, phaseCount,
                                   static_cast<uint64_t>(reader.file_size()), "bytes");
         applyReaderWithProgress(reader, handler, progress);
@@ -613,7 +655,8 @@ CompactExtractionReport extractNodesAndWaysWithCompactIndex(
     StringInterner& interner,
     const Parser::Options& options,
     const std::unordered_map<uint64_t, size_t>& relationIndexByWayId,
-    std::unordered_map<uint64_t, std::vector<Coordinate>>& relationWayGeometry) {
+    std::vector<RelationWaySpan>& relationWaySpans,
+    std::vector<Coordinate>& relationWayCoords) {
     CompactExtractionReport report;
     report.lowMemory = options.lowMemory;
     std::vector<uint64_t> recoveredUnnamedStreetWayIds;
@@ -674,7 +717,8 @@ CompactExtractionReport extractNodesAndWaysWithCompactIndex(
                                      ExtractionPass::NonStreet,
                                      true,
                                      true,
-                                     relationWayGeometry,
+                                     relationWaySpans,
+                                     relationWayCoords,
                                      4,
                                      phaseCount,
                                      "Address and boundary extraction");
@@ -689,7 +733,8 @@ CompactExtractionReport extractNodesAndWaysWithCompactIndex(
                                      ExtractionPass::Streets,
                                      false,
                                      false,
-                                     relationWayGeometry,
+                                     relationWaySpans,
+                                     relationWayCoords,
                                      7,
                                      phaseCount,
                                      "Street line extraction");
@@ -704,7 +749,8 @@ CompactExtractionReport extractNodesAndWaysWithCompactIndex(
                                      ExtractionPass::All,
                                      true,
                                      true,
-                                     relationWayGeometry,
+                                     relationWaySpans,
+                                     relationWayCoords,
                                      4,
                                      phaseCount,
                                      "Full dataset extraction");
