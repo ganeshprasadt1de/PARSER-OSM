@@ -186,6 +186,28 @@
       outline: 2px solid #facc15;
     }
 
+    .type-filter {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .type-filter button {
+      padding: 8px 6px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font-size: 0.78rem;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+
+    .type-filter button.active {
+      background: #1f2a2e;
+      color: white;
+      border-color: #1f2a2e;
+    }
+
     #map {
       width: 100%;
       height: 100%;
@@ -258,6 +280,13 @@
         <div class="stack">
           <input id="geocodeInput" type="text" placeholder="Street number city">
           <label><input id="useLlmGeocode" type="checkbox"> Use LLM for natural-language query</label>
+          <div id="geocodeTypeFilter" class="type-filter" aria-label="Geocoder result type">
+            <button type="button" class="active" data-type="">All</button>
+            <button type="button" data-type="house">Houses</button>
+            <button type="button" data-type="street">Streets</button>
+            <button type="button" data-type="admin">Admin</button>
+            <button type="button" data-type="poi">POIs</button>
+          </div>
           <div class="row">
             <button id="geocodeBtn" type="button">Search</button>
             <button id="clearGeocodeBtn" type="button">Clear</button>
@@ -327,6 +356,7 @@
     const cursorEl = document.getElementById("cursor");
     const geocodeInput = document.getElementById("geocodeInput");
     const useLlmGeocode = document.getElementById("useLlmGeocode");
+    const geocodeTypeFilter = document.getElementById("geocodeTypeFilter");
     const geocodeBtn = document.getElementById("geocodeBtn");
     const clearGeocodeBtn = document.getElementById("clearGeocodeBtn");
     const startOllamaBtn = document.getElementById("startOllamaBtn");
@@ -345,6 +375,7 @@
     let viewportRequestId = 0;
     let viewportAbortController = null;
     let geocodeResultEntries = [];
+    let selectedGeocodeType = "";
 
     function buildViewportQuery() {
       const bounds = map.getBounds();
@@ -841,6 +872,37 @@
       }).bindPopup(escapeHtml(geocodeResultLabel(result)));
     }
 
+    function addReferenceAnchorVisual(result) {
+      const anchor = result.referenceAnchor;
+      if (!anchor ||
+          !Number.isFinite(Number(anchor.lat)) ||
+          !Number.isFinite(Number(anchor.lon)) ||
+          !Number.isFinite(Number(result.lat)) ||
+          !Number.isFinite(Number(result.lon))) {
+        return [];
+      }
+
+      const anchorLatLng = [Number(anchor.lat), Number(anchor.lon)];
+      const resultLatLng = [Number(result.lat), Number(result.lon)];
+      const anchorLabel = anchor.label || anchor.category || "reference";
+      const line = L.polyline([resultLatLng, anchorLatLng], {
+        pane: "geocodePane",
+        color: "#0284c7",
+        weight: 3,
+        opacity: 0.95,
+        dashArray: "3 8"
+      }).bindPopup(escapeHtml(`${geocodeResultLabel(result)} near ${anchorLabel}`));
+      const marker = L.circleMarker(anchorLatLng, {
+        pane: "geocodePane",
+        radius: 6.5,
+        color: "#075985",
+        weight: 2,
+        fillColor: "#38bdf8",
+        fillOpacity: 0.95
+      }).bindPopup(escapeHtml(`reference ${anchor.category || "anchor"}: ${anchorLabel}`));
+      return [line, marker];
+    }
+
     function setSelectedGeocodeResult(selectedIndex) {
       for (const entry of geocodeResultEntries) {
         if (entry.button) {
@@ -855,16 +917,66 @@
       }
     }
 
+    function setGeocodeTypeFilter(type) {
+      selectedGeocodeType = type || "";
+      for (const button of geocodeTypeFilter.querySelectorAll("button[data-type]")) {
+        button.classList.toggle("active", button.dataset.type === selectedGeocodeType);
+      }
+    }
+
+    function compactJsonForDisplay(value) {
+      if (!value) {
+        return "";
+      }
+      if (typeof value === "string") {
+        try {
+          return JSON.stringify(JSON.parse(value));
+        } catch {
+          return value;
+        }
+      }
+      return JSON.stringify(value);
+    }
+
     async function drawGeocodeResult(data) {
       geocodeLayer.clearLayers();
       geocodeResultEntries = [];
       const results = Array.isArray(data.results) ? data.results : [];
-      const rows = [
-        ["Query time", `${Number(data.queryTimeMs || 0).toFixed(3)} ms`],
-        ["Results", String(results.length)]
-      ];
+      const rows = [];
+      if (data.acceptedIntentJson || data.ollamaFinalJson || data.ollamaInterpretation) {
+        rows.push(["LLM meaning", data.ollamaInterpretation || data.acceptedIntentSummary || "-", true]);
+        if (data.ollamaFinalJson) {
+          rows.push(["Ollama JSON", compactJsonForDisplay(data.ollamaFinalJson), true]);
+        }
+        if (data.acceptedIntentJson) {
+          rows.push(["Backend JSON", compactJsonForDisplay(data.acceptedIntentJson), true]);
+        }
+        if (Number.isFinite(Number(data.llmVerificationPasses))) {
+          rows.push(["LLM checks", `${data.llmVerificationPasses} pass${Number(data.llmVerificationPasses) === 1 ? "" : "es"}`]);
+        }
+      }
+      rows.push(["Query time", `${Number(data.queryTimeMs || 0).toFixed(3)} ms`]);
+      rows.push(["Results", String(results.length)]);
+      if (data.resultTypeFilter && data.resultTypeFilter !== "all") {
+        rows.push(["Type", data.resultTypeFilter]);
+      }
       if (data.originSource) {
         rows.push(["Origin", data.originSource]);
+      }
+      if (data.referenceCategory) {
+        const anchorCount = Number.isFinite(Number(data.referenceAnchorCount))
+          ? `, ${Number(data.referenceAnchorCount)} anchor${Number(data.referenceAnchorCount) === 1 ? "" : "s"}`
+          : "";
+        rows.push(["Reference", `${data.referenceCategory}${anchorCount}`]);
+      }
+      if (data.ignoredAddress) {
+        rows.push(["Ignored anchor", `${data.ignoredAddress}${data.ignoredAddressReason ? ` (${data.ignoredAddressReason})` : ""}`, true]);
+      }
+      if (Number.isFinite(Number(data.poiRecordsInspected))) {
+        rows.push(["POIs checked", String(Number(data.poiRecordsInspected))]);
+      }
+      if (data.poiSearchTruncated) {
+        rows.push(["Search guard", "stopped after internal scan limit"]);
       }
       setStatsRows(geocodeResultEl, rows);
 
@@ -929,6 +1041,16 @@
           }
         }
 
+        for (const referenceLayer of addReferenceAnchorVisual(result)) {
+          referenceLayer.addTo(geocodeLayer);
+          if (typeof referenceLayer.getLatLng === "function") {
+            bounds.push(referenceLayer.getLatLng());
+          } else if (typeof referenceLayer.getBounds === "function") {
+            const referenceBounds = referenceLayer.getBounds();
+            bounds.push(referenceBounds.getSouthWest(), referenceBounds.getNorthEast());
+          }
+        }
+
         const item = document.createElement("button");
         item.type = "button";
         item.className = "result-button";
@@ -962,6 +1084,9 @@
       const query = new URLSearchParams();
       query.set("q", queryText);
       query.set("limit", "20");
+      if (selectedGeocodeType) {
+        query.set("type", selectedGeocodeType);
+      }
       const endpoint = useLlmGeocode.checked ? "/api/natural-geocode" : "/api/geocode";
       if (useLlmGeocode.checked) {
         query.set("useLlm", "1");
@@ -1138,6 +1263,16 @@
     refreshBtn.addEventListener("click", scheduleRefresh);
     showStreets.addEventListener("change", scheduleRefresh);
     showAdmin.addEventListener("change", scheduleRefresh);
+    geocodeTypeFilter.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-type]");
+      if (!button) {
+        return;
+      }
+      setGeocodeTypeFilter(button.dataset.type || "");
+      if (geocodeInput.value.trim()) {
+        geocodeBtn.click();
+      }
+    });
     geocodeBtn.addEventListener("click", () => {
       geocodeSearch().catch((error) => {
         setStatsRows(geocodeResultEl, [

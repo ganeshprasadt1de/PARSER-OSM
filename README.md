@@ -14,6 +14,14 @@ docs/osm_program_explained.pdf
 
 That PDF explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, binary snapshot format, and memory layout with diagrams.
 
+The sheet-task audit report is included here:
+
+```text
+docs/sheet_task_audit.pdf
+```
+
+That PDF checks Sheet 1, Sheet 2, and Sheet 3 task coverage against the Europe binary snapshot. It lists ten probes per task, records the observed runtime behavior, and marks optional tasks that are not implemented.
+
 ## Index
 
 1. [What You Need To Download](#1-what-you-need-to-download)
@@ -43,9 +51,10 @@ That PDF explains the parser, reduced data model, reverse geocoder, forward geoc
 25. [Ollama Environment Variables](#25-ollama-environment-variables)
 26. [Console Progress And Metrics](#26-console-progress-and-metrics)
 27. [GeoJSON Export](#27-geojson-export)
-28. [Main Source Files](#28-main-source-files)
-29. [Troubleshooting](#29-troubleshooting)
-30. [Quick Command Template](#30-quick-command-template)
+28. [Included Reports](#28-included-reports)
+29. [Main Source Files](#29-main-source-files)
+30. [Troubleshooting](#30-troubleshooting)
+31. [Quick Command Template](#31-quick-command-template)
 
 ## 1. What You Need To Download
 
@@ -826,7 +835,41 @@ Export with explicit limits:
   --geojson-admin 300
 ```
 
-## 28. Main Source Files
+## 28. Included Reports
+
+The repository includes two PDF reports under `docs`.
+
+### 28.1 Program Explanation
+
+```text
+docs/osm_program_explained.pdf
+```
+
+This report explains how the program works from PBF input to browser output. It covers houses, streets, administrative areas, POIs, reverse geocoding, forward geocoding, fuzzy search, Ollama natural-language search, the local knowledge graph, ranking, binary snapshots, memory design, and the GUI.
+
+Use it when you want a step-by-step explanation of the implementation.
+
+### 28.2 Sheet Task Audit
+
+```text
+docs/sheet_task_audit.pdf
+docs/sheet_task_audit.tex
+```
+
+This report checks Sheet 1, Sheet 2, and Sheet 3 task coverage. Each task section contains ten distinct probes or queries. The report records:
+
+- implementation status
+- query or check used
+- HTTP/frontend behavior observed
+- wall-clock time
+- server-reported time where available
+- pass, warning, or not-implemented verdict
+
+The audit was run against the Europe snapshot. Optional tasks that are not part of the final program are marked as not implemented instead of being counted as working features.
+
+The report also includes a browser recheck section. The browser automation layer blocked direct raw `/api/...` page navigation, so the browser confirmation was done through the real frontend controls: search box, LLM checkbox, type filters, and Search button.
+
+## 29. Main Source Files
 
 ```text
 CMakeLists.txt                         build configuration
@@ -848,18 +891,20 @@ src/parser_parts/parser_flow.cpp       parser command flow and snapshot IO
 src/server.cpp                         HTTP API, reverse geocoder, natural search
 frontend/index.html                    Leaflet GUI
 docs/osm_program_explained.pdf         illustrated explanation
+docs/sheet_task_audit.pdf              sheet-task audit report
+docs/sheet_task_audit.tex              LaTeX source for the sheet-task audit report
 third_party/README.md                  bundled dependency notes
 ```
 
 The parser part files are included by `src/parser.cpp`. This keeps one compiled parser translation unit while making the implementation easier to navigate.
 
-## 29. Troubleshooting
+## 30. Troubleshooting
 
-### 29.1 `Binary snapshot has no embedded forward index`
+### 30.1 `Binary snapshot has no embedded forward index`
 
 The binary snapshot was written by an older build. Reparse the PBF and save a new `.bin`.
 
-### 29.2 `Binary snapshot not found`
+### 30.2 `Binary snapshot not found`
 
 Check the path:
 
@@ -869,7 +914,7 @@ ls -lh /path/to/output/europe-geocoder.bin
 
 Then start the server with the same path.
 
-### 29.3 Ollama command not found
+### 30.3 Ollama command not found
 
 Install Ollama:
 
@@ -889,7 +934,7 @@ If Ollama is installed but not on `PATH`, set:
 OSM_OLLAMA_BIN=/path/to/ollama
 ```
 
-### 29.4 Ollama port already in use
+### 30.4 Ollama port already in use
 
 The server can use an existing Ollama process. If you want the frontend button to restart Ollama, use the `Start Ollama Service` button.
 
@@ -899,15 +944,15 @@ Manual check:
 curl http://127.0.0.1:11434/api/tags
 ```
 
-### 29.5 Server looks frozen after loading a binary
+### 30.5 Server looks frozen after loading a binary
 
 The server builds runtime spatial indexes before printing the localhost URL. For Europe, this can still take time, but the forward-geocoder index is loaded from the snapshot and should not be rebuilt from scratch.
 
-### 29.6 Europe parse slows down during a phase
+### 30.6 Europe parse slows down during a phase
 
 The progress speed is an average over the phase. CPU-heavy geometry work, disk cache changes, memory pressure, and WSL filesystem speed can make the displayed throughput drop. Keep the PBF and build under `/path/to`, use `--low-memory`, and reduce `--pbf-threads` if swap pressure starts.
 
-### 29.7 Browser shows zero LLM results
+### 30.7 Browser shows zero LLM results
 
 Check these in order:
 
@@ -917,11 +962,11 @@ Check these in order:
 4. The GUI checkbox `Use LLM for natural-language query` is enabled.
 5. The query has enough context, or the map is centered near the area you want.
 
-### 29.8 No product inventory guarantee
+### 30.8 No product inventory guarantee
 
 The local knowledge graph can map a product to likely OSM categories. It cannot know live store inventory. For example, it can search pharmacies or chemists for cough syrup, but it cannot prove that one specific shelf currently contains cough syrup.
 
-## 30. Quick Command Template
+## 31. Quick Command Template
 
 These commands use placeholder paths. Replace them with your local paths:
 

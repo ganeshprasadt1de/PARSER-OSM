@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -21,7 +22,9 @@
 namespace {
 
 constexpr size_t kMinSubstringTokenLength = 3;
-constexpr size_t kMaxFuzzyVocabularyScan = 250000;
+constexpr size_t kMaxSubstringExpansionScan = 5000;
+constexpr size_t kMaxFuzzySeedTokenIndexes = 60000;
+constexpr size_t kMaxFuzzyTokenIndexesPerSeed = 20000;
 
 uint32_t checkedU32(size_t value, const char* field) {
     if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
@@ -391,6 +394,83 @@ int boundedEditDistance(const std::string& left, const std::string& right, int m
     return previous[right.size()];
 }
 
+int commonPrefixLength(const std::string& left, const std::string& right) {
+    const size_t limit = std::min(left.size(), right.size());
+    size_t index = 0;
+    while (index < limit && left[index] == right[index]) {
+        ++index;
+    }
+    return static_cast<int>(index);
+}
+
+std::vector<std::string> fuzzySeedSubstrings(const std::string& token, int maxDistance) {
+    std::vector<std::string> seeds;
+    if (token.size() < kMinSubstringTokenLength) {
+        return seeds;
+    }
+
+    const size_t pigeonholeSeed = token.size() / static_cast<size_t>(maxDistance + 1);
+    const size_t seedLength = std::max(kMinSubstringTokenLength, std::min<size_t>(5, pigeonholeSeed));
+    if (seedLength > token.size()) {
+        return seeds;
+    }
+
+    seeds.reserve(token.size() - seedLength + 1);
+    for (size_t offset = 0; offset + seedLength <= token.size(); ++offset) {
+        seeds.push_back(token.substr(offset, seedLength));
+    }
+    uniqueTokens(seeds);
+    std::sort(seeds.begin(), seeds.end(), [](const std::string& left, const std::string& right) {
+        if (left.size() != right.size()) {
+            return left.size() > right.size();
+        }
+        return left < right;
+    });
+    return seeds;
+}
+
+void collectTokenIndexesForSubstring(const ForwardGeocodeIndex& index,
+                                     const std::string& seed,
+                                     std::unordered_set<uint32_t>& seen,
+                                     std::vector<uint32_t>& tokenIndexes,
+                                     size_t maxPerSeed,
+                                     size_t maxTotal) {
+    if (seed.size() < kMinSubstringTokenLength || tokenIndexes.size() >= maxTotal) {
+        return;
+    }
+
+    const auto lower = std::lower_bound(index.suffixArray.begin(), index.suffixArray.end(), seed,
+        [&](const GeocodeSuffixEntry& entry, const std::string& value) {
+            if (entry.tokenIndex >= index.vocabulary.size()) {
+                return true;
+            }
+            const std::string& candidate = index.vocabulary[entry.tokenIndex];
+            return candidate.compare(entry.offset, std::string::npos, value) < 0;
+        });
+
+    size_t collectedForSeed = 0;
+    for (auto it = lower; it != index.suffixArray.end(); ++it) {
+        const GeocodeSuffixEntry& entry = *it;
+        if (entry.tokenIndex >= index.vocabulary.size()) {
+            continue;
+        }
+        const std::string& candidate = index.vocabulary[entry.tokenIndex];
+        if (entry.offset + seed.size() > candidate.size()) {
+            break;
+        }
+        if (candidate.compare(entry.offset, seed.size(), seed) != 0) {
+            break;
+        }
+        if (seen.insert(entry.tokenIndex).second) {
+            tokenIndexes.push_back(entry.tokenIndex);
+            ++collectedForSeed;
+            if (collectedForSeed >= maxPerSeed || tokenIndexes.size() >= maxTotal) {
+                break;
+            }
+        }
+    }
+}
+
 }  // namespace
 
 std::string normalizeSearchText(const std::string& input) {
@@ -578,6 +658,9 @@ std::vector<std::string> substringTokenExpansions(const ForwardGeocodeIndex& ind
     }
 
     std::unordered_set<uint32_t> seen;
+    std::vector<std::tuple<int, int, std::string>> candidates;
+    seen.reserve(std::min(kMaxSubstringExpansionScan, index.vocabulary.size()));
+    candidates.reserve(std::min(kMaxSubstringExpansionScan, index.vocabulary.size()));
     const auto lower = std::lower_bound(index.suffixArray.begin(), index.suffixArray.end(), token,
         [&](const GeocodeSuffixEntry& entry, const std::string& value) {
             if (entry.tokenIndex >= index.vocabulary.size()) {
@@ -601,10 +684,29 @@ std::vector<std::string> substringTokenExpansions(const ForwardGeocodeIndex& ind
             break;
         }
         if (seen.insert(entry.tokenIndex).second) {
-            result.push_back(candidate);
-            if (result.size() >= maxExpansions) {
+            const int prefixPenalty = candidate.rfind(token, 0) == 0 ? 0 : 1;
+            const int lengthPenalty = static_cast<int>(
+                std::abs(static_cast<int>(candidate.size()) - static_cast<int>(token.size())));
+            candidates.emplace_back(prefixPenalty, lengthPenalty, candidate);
+            if (candidates.size() >= kMaxSubstringExpansionScan) {
                 break;
             }
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+        if (std::get<0>(left) != std::get<0>(right)) {
+            return std::get<0>(left) < std::get<0>(right);
+        }
+        if (std::get<1>(left) != std::get<1>(right)) {
+            return std::get<1>(left) < std::get<1>(right);
+        }
+        return std::get<2>(left) < std::get<2>(right);
+    });
+    for (const auto& candidate : candidates) {
+        result.push_back(std::get<2>(candidate));
+        if (result.size() >= maxExpansions) {
+            break;
         }
     }
     return result;
@@ -614,32 +716,59 @@ std::vector<std::string> fuzzyTokenExpansions(const ForwardGeocodeIndex& index,
                                               const std::string& token,
                                               size_t maxExpansions) {
     std::vector<std::string> result;
-    if (!index.available || token.size() < 4 || maxExpansions == 0 ||
-        index.vocabulary.size() > kMaxFuzzyVocabularyScan) {
+    if (!index.available || token.size() < 4 || maxExpansions == 0) {
         return result;
     }
 
     const int maxDistance = token.size() <= 5 ? 1 : 2;
-    std::vector<std::pair<int, std::string>> candidates;
-    for (const std::string& candidate : index.vocabulary) {
+    std::vector<uint32_t> tokenIndexes;
+    tokenIndexes.reserve(std::min(kMaxFuzzySeedTokenIndexes, index.vocabulary.size()));
+    std::unordered_set<uint32_t> seen;
+    seen.reserve(kMaxFuzzySeedTokenIndexes);
+
+    for (const std::string& seed : fuzzySeedSubstrings(token, maxDistance)) {
+        collectTokenIndexesForSubstring(index,
+                                        seed,
+                                        seen,
+                                        tokenIndexes,
+                                        kMaxFuzzyTokenIndexesPerSeed,
+                                        kMaxFuzzySeedTokenIndexes);
+        if (tokenIndexes.size() >= kMaxFuzzySeedTokenIndexes) {
+            break;
+        }
+    }
+
+    std::vector<std::tuple<int, int, size_t, std::string>> candidates;
+    candidates.reserve(std::min(tokenIndexes.size(), maxExpansions * 8));
+    for (uint32_t tokenIndex : tokenIndexes) {
+        if (tokenIndex >= index.vocabulary.size()) {
+            continue;
+        }
+        const std::string& candidate = index.vocabulary[tokenIndex];
         if (candidate.empty() || std::abs(static_cast<int>(candidate.size()) - static_cast<int>(token.size())) > maxDistance) {
             continue;
         }
         const int distance = boundedEditDistance(token, candidate, maxDistance);
         if (distance <= maxDistance) {
-            candidates.emplace_back(distance, candidate);
+            candidates.emplace_back(distance, -commonPrefixLength(token, candidate), candidate.size(), candidate);
         }
     }
 
     std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
-        if (left.first != right.first) {
-            return left.first < right.first;
+        if (std::get<0>(left) != std::get<0>(right)) {
+            return std::get<0>(left) < std::get<0>(right);
         }
-        return left.second < right.second;
+        if (std::get<1>(left) != std::get<1>(right)) {
+            return std::get<1>(left) < std::get<1>(right);
+        }
+        if (std::get<2>(left) != std::get<2>(right)) {
+            return std::get<2>(left) < std::get<2>(right);
+        }
+        return std::get<3>(left) < std::get<3>(right);
     });
 
     for (const auto& candidate : candidates) {
-        result.push_back(candidate.second);
+        result.push_back(std::get<3>(candidate));
         if (result.size() >= maxExpansions) {
             break;
         }
