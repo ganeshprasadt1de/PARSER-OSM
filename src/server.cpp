@@ -86,8 +86,8 @@ struct NaturalPoiCandidate {
 
 struct NaturalReferenceAnchor {
     Coordinate point;
-    uint32_t index = 0;
-    double distanceMeters = 0.0;
+    uint32_t index = std::numeric_limits<uint32_t>::max();
+    double distanceMeters = -1.0;
 };
 
 struct NaturalAddressDecision {
@@ -119,6 +119,8 @@ struct NaturalIntent {
     std::string ollamaVerificationJson2;
     std::string ollamaFinalJson;
     std::string ollamaDebugSummary;
+    bool backendCorrected = false;
+    std::string backendCorrectionReason;
 };
 
 struct OllamaSettings {
@@ -304,6 +306,29 @@ bool isNumberToken(const std::string& token) {
     return std::any_of(token.begin(), token.end(), [](char c) {
         return std::isdigit(static_cast<unsigned char>(c));
     });
+}
+
+bool containsNegativeNumericToken(const std::string& text) {
+    for (size_t i = 0; i + 1 < text.size(); ++i) {
+        if (text[i] != '-' || !std::isdigit(static_cast<unsigned char>(text[i + 1]))) {
+            continue;
+        }
+        if (i == 0 || std::isspace(static_cast<unsigned char>(text[i - 1])) != 0 ||
+            text[i - 1] == ',' || text[i - 1] == ';') {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isUnboundedGenericGeocodeQuery(const QueryAnalysis& query) {
+    if (query.hasNumber || query.hasPostcode || query.textTokens.size() != 1) {
+        return false;
+    }
+    const std::string& token = query.textTokens.front();
+    return token == "strasse" || token == "strasze" || token == "street" ||
+        token == "road" || token == "weg" || token == "gasse" ||
+        token == "place" || token == "poi";
 }
 
 bool isPostcodeToken(const std::string& token) {
@@ -963,20 +988,29 @@ std::string normalizeCategoryAlias(const std::string& text) {
         normalized == "gruenanlage" || normalized == "grunanlage") {
         return "park";
     }
-    if (normalized == "restaurant" || normalized == "restaurants" ||
-        normalized == "cafe" || normalized == "cafes") {
+    if (normalized == "restaurant" || normalized == "restaurants") {
         return "restaurant";
+    }
+    if (normalized == "cafe" || normalized == "cafes" || normalized == "caf\xc3\xa9" ||
+        normalized == "coffee shop" ||
+        normalized == "kaffee" || normalized == "kaffeehaus") {
+        return "cafe";
     }
     if (normalized == "fast food" || normalized == "fastfood" ||
         normalized == "schnellrestaurant" || normalized == "imbiss") {
         return "fast_food";
     }
     if (normalized == "shop" || normalized == "shops" || normalized == "store" ||
-        normalized == "stores" || normalized == "supermarket" || normalized == "supermarkets" ||
+        normalized == "stores" ||
         normalized == "laden" || normalized == "laeden" || normalized == "ladenen" ||
         normalized == "geschaeft" || normalized == "geschaefte" ||
-        normalized == "geschaft" || normalized == "geschafte" || normalized == "supermarkt") {
+        normalized == "geschaft" || normalized == "geschafte") {
         return "shop";
+    }
+    if (normalized == "supermarket" || normalized == "supermarkets" || normalized == "supermarkt" ||
+        normalized == "supermaerkte" || normalized == "supermarkte" ||
+        normalized == "supermaerkten" || normalized == "supermarkten") {
+        return "supermarket";
     }
     if (normalized == "tankstelle" || normalized == "fuel" ||
         normalized == "fuel station" || normalized == "gas station" ||
@@ -993,6 +1027,24 @@ std::string normalizeCategoryAlias(const std::string& text) {
     if (normalized == "school" || normalized == "schools" || normalized == "schule") {
         return "school";
     }
+    if (normalized == "museum" || normalized == "museums" || normalized == "museen") {
+        return "museum";
+    }
+    if (normalized == "university" || normalized == "universities" ||
+        normalized == "universitaet" || normalized == "universitat") {
+        return "university";
+    }
+    if (normalized == "railway station" || normalized == "train station" ||
+        normalized == "station" || normalized == "bahnhof") {
+        return "station";
+    }
+    if (normalized == "pharmacy" || normalized == "pharmacies" || normalized == "apotheke") {
+        return "pharmacy";
+    }
+    if (normalized == "bakery" || normalized == "bakeries" || normalized == "baeckerei" ||
+        normalized == "backerei") {
+        return "bakery";
+    }
     return "";
 }
 
@@ -1003,7 +1055,8 @@ std::string referenceCategoryFromText(const std::string& text) {
     }
     const auto isReferencePreposition = [](const std::string& token) {
         return token == "near" || token == "around" || token == "nearby" ||
-            token == "at" || token == "by" || token == "bei" || token == "nahe" ||
+            token == "at" || token == "by" || token == "close" || token == "with" ||
+            token == "bei" || token == "nahe" || token == "mit" ||
             token == "naehe" || token == "nahebei" || token == "around";
     };
     for (size_t i = 0; i < tokens.size(); ++i) {
@@ -1075,7 +1128,16 @@ const std::vector<ConceptRule>& conceptRules() {
         {"optician", "glasses and contact lenses", {{"shop", "optician", 100}}},
         {"pet_supplies", "pet supplies", {{"shop", "pet", 100}}},
         {"photo_printing", "photo and printing services", {{"shop", "photo", 100}, {"shop", "copyshop", 95}, {"shop", "stationery", 50}}},
-        {"hair_beauty", "hair and beauty services", {{"shop", "hairdresser", 100}, {"shop", "beauty", 90}, {"shop", "cosmetics", 60}}}
+        {"hair_beauty", "hair and beauty services", {{"shop", "hairdresser", 100}, {"shop", "beauty", 90}, {"shop", "cosmetics", 60}}},
+        {"hairdresser", "hairdressers", {{"shop", "hairdresser", 100}}},
+        {"locksmith", "locksmith and key services", {{"shop", "locksmith", 100}, {"craft", "locksmith", 100}}},
+        {"laundry", "laundry and dry cleaning", {{"shop", "laundry", 100}, {"shop", "dry_cleaning", 100}}},
+        {"parcel_delivery", "parcel and postal services", {{"amenity", "post_office", 100}, {"shop", "parcel", 95}, {"shop", "parcel_locker", 90}}},
+        {"dentist", "dentists", {{"amenity", "dentist", 100}}},
+        {"public_toilet", "public toilets", {{"amenity", "toilets", 100}}},
+        {"charging", "vehicle charging stations", {{"amenity", "charging_station", 100}}},
+        {"atm", "cash machines", {{"amenity", "atm", 100}}},
+        {"cafe", "cafes and coffee shops", {{"amenity", "cafe", 100}}}
     };
     return rules;
 }
@@ -1266,6 +1328,7 @@ std::string inferProductFamilyFromQuery(const std::string& rawQuery) {
         {"birthday cake", "cake_sweets"}, {"cake", "cake_sweets"}, {"geburtstagstorte", "cake_sweets"},
         {"milk", "daily_groceries"}, {"milch", "daily_groceries"}, {"kaffeebohnen", "daily_groceries"}, {"coffee beans", "daily_groceries"},
         {"bananas", "fruit_vegetables"}, {"bananen", "fruit_vegetables"},
+        {"pet food", "pet_food"}, {"tierfutter", "pet_food"},
         {"cat food", "pet_food"}, {"dog food", "pet_food"}, {"katzenfutter", "pet_food"},
         {"hundefutter", "pet_food"}, {"hundeleckerlis", "pet_food"},
         {"phone charger", "phone_accessories"}, {"usb cable", "phone_accessories"},
@@ -1277,6 +1340,7 @@ std::string inferProductFamilyFromQuery(const std::string& rawQuery) {
         {"kopfhorer", "phone_accessories"},
         {"laptop mouse", "computer_accessories"}, {"computermaus", "computer_accessories"},
         {"printer ink", "printer_supplies"}, {"druckerpatronen", "printer_supplies"},
+        {"druckertinte", "printer_supplies"},
         {"winter jacket", "outerwear"}, {"winterjacke", "outerwear"},
         {"socks", "basic_clothing"}, {"socken", "basic_clothing"},
         {"running shoes", "running_shoes"}, {"laufschuhe", "running_shoes"},
@@ -1342,6 +1406,54 @@ bool startsWithWord(const std::string& text, const std::string& prefix) {
     return text.rfind(prefix, 0) == 0;
 }
 
+std::string inferExplicitServiceConceptFromQuery(const std::string& rawQuery) {
+    const std::string padded = " " + normalizeSearchText(rawQuery) + " ";
+    const std::vector<std::pair<std::string, std::string>> phrases = {
+        {"public toilet", "public_toilet"}, {"public restroom", "public_toilet"},
+        {"oeffentliche toilette", "public_toilet"}, {"offentliche toilette", "public_toilet"},
+        {"charging station", "charging"}, {"charging stations", "charging"},
+        {"ev charging", "charging"}, {"ladestation", "charging"},
+        {"ladestationen", "charging"}, {"ladesaeule", "charging"}, {"ladesaule", "charging"},
+        {"dry cleaning", "laundry"}, {"dry cleaner", "laundry"}, {"waescherei", "laundry"},
+        {"wascherei", "laundry"}, {"textilreinigung", "laundry"}, {"reinigung", "laundry"},
+        {"locksmith", "locksmith"}, {"locked out", "locksmith"}, {"key copied", "locksmith"},
+        {"key cutting", "locksmith"}, {"schluesseldienst", "locksmith"},
+        {"schlusseldienst", "locksmith"}, {"schluessel nachmachen", "locksmith"},
+        {"schlussel nachmachen", "locksmith"},
+        {"hairdresser", "hairdresser"}, {"barber", "hairdresser"},
+        {"friseur", "hairdresser"}, {"haare schneiden", "hairdresser"},
+        {"send a parcel", "parcel_delivery"}, {"drop a parcel", "parcel_delivery"},
+        {"parcel delivery", "parcel_delivery"}, {"parcel service", "parcel_delivery"},
+        {"paket abgeben", "parcel_delivery"}, {"paket versenden", "parcel_delivery"},
+        {"paketdienst", "parcel_delivery"},
+        {"dentist", "dentist"}, {"zahnarzt", "dentist"},
+        {" atm ", "atm"}, {"cash machine", "atm"}, {"geldautomat", "atm"},
+        {"geldautomaten", "atm"},
+        {"coffee", "cafe"}, {"kaffee", "cafe"},
+        {"flowers", "flowers"}, {"flower shop", "flowers"}, {"blumen", "flowers"},
+        {"parking", "parking"}, {"car park", "parking"}, {"parkplatz", "parking"},
+        {"parken", "parking"}, {"can i park", "parking"}, {"where can i park", "parking"}
+    };
+    for (const auto& phrase : phrases) {
+        const std::string normalizedPhrase = normalizeSearchText(phrase.first);
+        if (padded.find(" " + normalizedPhrase + " ") != std::string::npos) {
+            return phrase.second;
+        }
+    }
+    if (padded.find(" paket ") != std::string::npos &&
+        (padded.find(" abgeben ") != std::string::npos ||
+         padded.find(" versenden ") != std::string::npos)) {
+        return "parcel_delivery";
+    }
+    if (padded.find(" auto ") != std::string::npos &&
+        (padded.find(" repariert ") != std::string::npos ||
+         padded.find(" reparieren ") != std::string::npos ||
+         padded.find(" reparatur ") != std::string::npos)) {
+        return "car_service";
+    }
+    return "";
+}
+
 std::string naturalQueryTargetPhrase(const std::string& rawQuery) {
     const std::vector<std::string> tokens = orderedSearchTokens(rawQuery);
     std::vector<std::string> target;
@@ -1349,15 +1461,17 @@ std::string naturalQueryTargetPhrase(const std::string& rawQuery) {
         return token == "where" || token == "can" || token == "i" || token == "find" ||
             token == "buy" || token == "get" || token == "repair" || token == "print" ||
             token == "use" || token == "show" || token == "me" || token == "please" ||
+            token == "need" || token == "want" || token == "drop" ||
             token == "is" || token == "are" || token == "wo" ||
             token == "finde" || token == "ich" || token == "suche" || token == "bekomme" ||
             token == "kaufen" || token == "reparieren" || token == "drucken" ||
-            token == "kann" || token == "kannst" ||
+            token == "kann" || token == "kannst" || token == "brauche" ||
+            token == "moechte" || token == "mochte" || token == "abgeben" ||
             token == "gibt" || token == "es" || token == "mir";
     };
     const auto isStopAfterTarget = [](const std::string& token) {
         return token == "near" || token == "around" || token == "nearby" || token == "bei" ||
-            token == "nahe" || token == "in" || token == "an";
+            token == "nahe" || token == "close" || token == "in" || token == "an";
     };
     const auto isNoise = [](const std::string& token) {
         return token == "the" || token == "a" || token == "an" || token == "eine" ||
@@ -1381,6 +1495,20 @@ std::string naturalQueryTargetPhrase(const std::string& rawQuery) {
         }
     }
 
+    const auto isNamedPoiServiceSuffix = [](const std::string& token) {
+        return token == "restaurant" || token == "restaurants" ||
+            token == "store" || token == "stores" || token == "shop" || token == "shops" ||
+            token == "branch" || token == "branches" || token == "location" || token == "locations" ||
+            token == "dealership" || token == "showroom" || token == "supermarket" ||
+            token == "petrol" || token == "fuel" || token == "station" ||
+            token == "restaurant" || token == "restaurants" ||
+            token == "filiale" || token == "filialen" || token == "laden" || token == "markt" ||
+            token == "autohaus" || token == "tankstelle" || token == "paketshop";
+    };
+    while (target.size() > 1 && isNamedPoiServiceSuffix(target.back())) {
+        target.pop_back();
+    }
+
     std::ostringstream phrase;
     for (size_t i = 0; i < target.size(); ++i) {
         if (i > 0) {
@@ -1391,25 +1519,56 @@ std::string naturalQueryTargetPhrase(const std::string& rawQuery) {
     return phrase.str();
 }
 
-std::string addressWithoutHouseNumber(const std::string& rawAddress) {
-    const QueryAnalysis address = analyzeQuery(rawAddress);
-    if (!address.hasNumber) {
+std::string inferTargetConceptFromQuery(const std::string& rawQuery) {
+    const std::string target = normalizeSearchText(naturalQueryTargetPhrase(rawQuery));
+    if (target.empty()) {
         return "";
     }
-    const std::vector<std::string> tokens = orderedSearchTokens(rawAddress);
-    std::ostringstream stream;
-    bool first = true;
-    for (const std::string& token : tokens) {
-        if (std::find(address.numberTokens.begin(), address.numberTokens.end(), token) != address.numberTokens.end()) {
-            continue;
-        }
-        if (!first) {
-            stream << ' ';
-        }
-        first = false;
-        stream << token;
+    const std::string padded = " " + target + " ";
+    const auto hasWord = [&padded](const std::string& word) {
+        return padded.find(" " + word + " ") != std::string::npos;
+    };
+    if (startsWithWord(target, "hotel") || startsWithWord(target, "hotels")) {
+        return "hotel";
     }
-    return stream.str();
+    if (hasWord("restaurant") || hasWord("restaurants")) {
+        return "restaurant";
+    }
+    if (hasWord("pharmacy") || hasWord("pharmacies") || hasWord("apotheke")) {
+        return "medicine";
+    }
+    if (hasWord("bakery") || hasWord("baeckerei") || hasWord("backerei")) {
+        return "bakery_food";
+    }
+    if (hasWord("eyeglasses") || hasWord("glasses") || hasWord("optician") ||
+        hasWord("brille") || hasWord("optiker")) {
+        return "optician";
+    }
+    if (hasWord("furniture") || hasWord("moebel") || hasWord("mobel")) {
+        return "furniture_home";
+    }
+    if (hasWord("hairdresser") || hasWord("barber") || hasWord("friseur")) {
+        return "hairdresser";
+    }
+    if (hasWord("locksmith") || hasWord("schluesseldienst") || hasWord("schlusseldienst")) {
+        return "locksmith";
+    }
+    if (hasWord("hospital") || hasWord("hospitals") || hasWord("krankenhaus") ||
+        hasWord("krankenhaeuser") || hasWord("krankenhauser")) {
+        return "hospital";
+    }
+    if (hasWord("park") || hasWord("parks")) {
+        return "park";
+    }
+    if (hasWord("shoe") || hasWord("shoes") || hasWord("schuhgeschaeft") ||
+        hasWord("schuhgeschaft") || hasWord("schuhgeschaefte") ||
+        hasWord("schuhgeschafte")) {
+        return "shoes";
+    }
+    if (hasWord("flower") || hasWord("flowers") || hasWord("blumen")) {
+        return "flowers";
+    }
+    return "";
 }
 
 bool looksLikeShortAddressQuery(const std::string& rawQuery) {
@@ -1462,6 +1621,44 @@ NaturalIntent parseDeterministicNaturalIntent(const std::string& rawQuery) {
             }
             return intent;
         }
+    }
+
+    for (size_t pos = 0; pos + 1 < tokens.size(); ++pos) {
+        if (tokens[pos] != "at" && tokens[pos] != "bei") {
+            continue;
+        }
+        size_t end = pos + 1;
+        while (end < tokens.size() && tokens[end] != "in" && tokens[end] != "near" &&
+               tokens[end] != "around" && tokens[end] != "nahe") {
+            ++end;
+        }
+        if (end <= pos + 1 || end - (pos + 1) > 3) {
+            continue;
+        }
+        bool containsGenericCategory = false;
+        for (size_t i = pos + 1; i < end; ++i) {
+            if (!normalizeCategoryAlias(tokens[i]).empty()) {
+                containsGenericCategory = true;
+                break;
+            }
+        }
+        if (containsGenericCategory) {
+            continue;
+        }
+        intent.type = NaturalIntentType::NamedPoiInPlace;
+        std::ostringstream poiName;
+        for (size_t i = pos + 1; i < end; ++i) {
+            if (i > pos + 1) {
+                poiName << ' ';
+            }
+            poiName << tokens[i];
+        }
+        intent.poiName = poiName.str();
+        const size_t inPos = normalized.find(" in ");
+        if (inPos != std::string::npos) {
+            intent.place = trimCopy(normalized.substr(inPos + 4));
+        }
+        return intent;
     }
 
     const std::string targetPhrase = naturalQueryTargetPhrase(rawQuery);
@@ -1585,6 +1782,46 @@ NaturalIntent parseDeterministicNaturalIntent(const std::string& rawQuery) {
     return intent;
 }
 
+bool parseJsonHex4(const std::string& text, size_t offset, uint32_t& value) {
+    if (offset + 4 > text.size()) {
+        return false;
+    }
+    value = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        const char c = text[offset + i];
+        uint32_t digit = 0;
+        if (c >= '0' && c <= '9') {
+            digit = static_cast<uint32_t>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            digit = static_cast<uint32_t>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            digit = static_cast<uint32_t>(c - 'A' + 10);
+        } else {
+            return false;
+        }
+        value = (value << 4U) | digit;
+    }
+    return true;
+}
+
+void appendUtf8CodePoint(std::string& output, uint32_t codePoint) {
+    if (codePoint <= 0x7FU) {
+        output.push_back(static_cast<char>(codePoint));
+    } else if (codePoint <= 0x7FFU) {
+        output.push_back(static_cast<char>(0xC0U | (codePoint >> 6U)));
+        output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    } else if (codePoint <= 0xFFFFU) {
+        output.push_back(static_cast<char>(0xE0U | (codePoint >> 12U)));
+        output.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    } else if (codePoint <= 0x10FFFFU) {
+        output.push_back(static_cast<char>(0xF0U | (codePoint >> 18U)));
+        output.push_back(static_cast<char>(0x80U | ((codePoint >> 12U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    }
+}
+
 std::string jsonStringField(const std::string& json, const std::string& key) {
     const std::string needle = "\"" + key + "\"";
     size_t pos = json.find(needle);
@@ -1600,26 +1837,49 @@ std::string jsonStringField(const std::string& json, const std::string& key) {
         return "";
     }
     std::string value;
-    bool escaped = false;
     for (size_t i = pos + 1; i < json.size(); ++i) {
         const char c = json[i];
-        if (escaped) {
-            if (c == 'n') {
-                value.push_back('\n');
-            } else {
-                value.push_back(c);
-            }
-            escaped = false;
-            continue;
-        }
-        if (c == '\\') {
-            escaped = true;
-            continue;
-        }
         if (c == '"') {
             break;
         }
-        value.push_back(c);
+        if (c != '\\') {
+            value.push_back(c);
+            continue;
+        }
+        if (++i >= json.size()) {
+            break;
+        }
+        const char escape = json[i];
+        if (escape == '"' || escape == '\\' || escape == '/') {
+            value.push_back(escape);
+        } else if (escape == 'b') {
+            value.push_back('\b');
+        } else if (escape == 'f') {
+            value.push_back('\f');
+        } else if (escape == 'n') {
+            value.push_back('\n');
+        } else if (escape == 'r') {
+            value.push_back('\r');
+        } else if (escape == 't') {
+            value.push_back('\t');
+        } else if (escape == 'u') {
+            uint32_t codePoint = 0;
+            if (!parseJsonHex4(json, i + 1, codePoint)) {
+                continue;
+            }
+            i += 4;
+            if (codePoint >= 0xD800U && codePoint <= 0xDBFFU &&
+                i + 6 < json.size() && json[i + 1] == '\\' && json[i + 2] == 'u') {
+                uint32_t low = 0;
+                if (parseJsonHex4(json, i + 3, low) && low >= 0xDC00U && low <= 0xDFFFU) {
+                    codePoint = 0x10000U + ((codePoint - 0xD800U) << 10U) + (low - 0xDC00U);
+                    i += 6;
+                }
+            }
+            if (!(codePoint >= 0xD800U && codePoint <= 0xDFFFU)) {
+                appendUtf8CodePoint(value, codePoint);
+            }
+        }
     }
     return value;
 }
@@ -2037,6 +2297,12 @@ NaturalIntent parseOllamaIntent(const std::string& rawQuery) {
     const std::string inferredFamily = inferProductFamilyFromQuery(rawQuery);
     if (!inferredFamily.empty()) {
         if (const ProductFamilyRule* family = findProductFamilyRule(inferredFamily)) {
+            if (intent.type != NaturalIntentType::NearestConceptToAddress ||
+                intent.productFamily != inferredFamily || intent.concept != family->concept) {
+                intent.backendCorrected = true;
+                intent.backendCorrectionReason =
+                    "explicit product phrase validated against the local concept graph";
+            }
             intent.type = NaturalIntentType::NearestConceptToAddress;
             intent.productFamily = inferredFamily;
             intent.concept = family->concept;
@@ -2045,8 +2311,39 @@ NaturalIntent parseOllamaIntent(const std::string& rawQuery) {
             }
         }
     }
-    if (intent.referenceCategory.empty()) {
-        intent.referenceCategory = referenceCategoryFromText(rawQuery);
+    const std::string explicitServiceConcept = inferExplicitServiceConceptFromQuery(rawQuery);
+    if (!explicitServiceConcept.empty() &&
+        (intent.type != NaturalIntentType::NearestConceptToAddress ||
+         intent.concept != explicitServiceConcept || !intent.productFamily.empty())) {
+        intent.type = NaturalIntentType::NearestConceptToAddress;
+        intent.concept = explicitServiceConcept;
+        intent.productFamily.clear();
+        intent.category.clear();
+        intent.backendCorrected = true;
+        intent.backendCorrectionReason =
+            "explicit service phrase validated against the local OSM concept graph";
+    }
+    const std::string explicitTargetConcept = inferTargetConceptFromQuery(rawQuery);
+    if (!explicitTargetConcept.empty() && inferredFamily.empty() && explicitServiceConcept.empty() &&
+        (intent.type != NaturalIntentType::NearestConceptToAddress ||
+         intent.concept != explicitTargetConcept || !intent.productFamily.empty())) {
+        intent.type = NaturalIntentType::NearestConceptToAddress;
+        intent.concept = explicitTargetConcept;
+        intent.productFamily.clear();
+        intent.category.clear();
+        intent.backendCorrected = true;
+        intent.backendCorrectionReason =
+            "explicit target phrase validated against the local OSM concept graph";
+    }
+    const std::string explicitReferenceCategory = referenceCategoryFromText(rawQuery);
+    if (intent.referenceCategory != explicitReferenceCategory) {
+        if (!intent.referenceCategory.empty()) {
+            intent.backendCorrected = true;
+            intent.backendCorrectionReason = explicitReferenceCategory.empty()
+                ? "reference category removed because the user query did not specify one"
+                : "reference category corrected from the explicit relationship phrase";
+        }
+        intent.referenceCategory = explicitReferenceCategory;
     }
     intent.fromLlm = true;
     intent.verificationPasses = (!verified1.empty() ? 1 : 0) + (!verified2.empty() ? 1 : 0);
@@ -2145,6 +2442,8 @@ std::string naturalIntentDebugFields(const NaturalIntent& intent, const std::str
     fields << "\"ollamaVerificationJson1\":\"" << jsonEscape(intent.ollamaVerificationJson1) << "\",";
     fields << "\"ollamaVerificationJson2\":\"" << jsonEscape(intent.ollamaVerificationJson2) << "\",";
     fields << "\"ollamaFinalJson\":\"" << jsonEscape(intent.ollamaFinalJson) << "\",";
+    fields << "\"backendCorrected\":" << (intent.backendCorrected ? "true" : "false") << ",";
+    fields << "\"backendCorrectionReason\":\"" << jsonEscape(intent.backendCorrectionReason) << "\",";
     return fields.str();
 }
 
@@ -2513,14 +2812,28 @@ std::vector<std::vector<std::string>> englishGermanPlaceTokenVariants(const std:
     const std::string& token = placeTokens.front();
     if (token == "vienna") {
         variants.push_back({"wien"});
+    } else if (token == "wien") {
+        variants.push_back({"vienna"});
     } else if (token == "zurich") {
         variants.push_back({"zuerich"});
+    } else if (token == "zuerich") {
+        variants.push_back({"zurich"});
     } else if (token == "munich") {
         variants.push_back({"muenchen"});
+    } else if (token == "muenchen") {
+        variants.push_back({"munich"});
     } else if (token == "cologne") {
         variants.push_back({"koeln"});
+    } else if (token == "koeln") {
+        variants.push_back({"cologne"});
     } else if (token == "nuremberg") {
         variants.push_back({"nuernberg"});
+    } else if (token == "nuernberg") {
+        variants.push_back({"nuremberg"});
+    } else if (token == "nice") {
+        variants.push_back({"nizza"});
+    } else if (token == "nizza") {
+        variants.push_back({"nice"});
     }
     return variants;
 }
@@ -2530,7 +2843,8 @@ bool isEnglishGermanPlaceToken(const std::string& token) {
         token == "zurich" || token == "zuerich" ||
         token == "munich" || token == "muenchen" ||
         token == "cologne" || token == "koeln" ||
-        token == "nuremberg" || token == "nuernberg";
+        token == "nuremberg" || token == "nuernberg" ||
+        token == "nice" || token == "nizza";
 }
 
 bool hasAdminAreaForExactPlaceTokens(const OSMDataset& data,
@@ -2625,8 +2939,12 @@ std::string explicitPlaceRestrictionFromQuery(const OSMDataset& data,
         return "";
     }
 
+    const auto isPlacePreposition = [](const std::string& token) {
+        return token == "in" || token == "near" || token == "around" ||
+            token == "bei" || token == "nahe";
+    };
     for (size_t pos = tokens.size(); pos-- > 0;) {
-        if (tokens[pos] != "in") {
+        if (!isPlacePreposition(tokens[pos])) {
             continue;
         }
         if (pos + 2 < tokens.size() &&
@@ -2748,12 +3066,20 @@ bool containsEnglishGermanPlaceToken(const std::vector<std::string>& tokens) {
     return std::any_of(tokens.begin(), tokens.end(), isEnglishGermanPlaceToken);
 }
 
-std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& data,
-                                                            const ForwardGeocodeIndex& index,
-                                                            const std::string& rawQuery,
-                                                            const QueryAnalysis& query,
-                                                            size_t limit,
-                                                            const std::unordered_set<uint64_t>& existingKeys) {
+bool looksLikeStreetSearchToken(const std::string& token);
+std::vector<std::string> germanInsertedEVariants(const std::string& token);
+void appendStreetFormAlternatives(std::vector<std::string>& alternatives,
+                                  const std::string& token);
+Coordinate streetRepresentativePoint(const OSMDataset& data, const StreetRecord& street);
+Coordinate adminRepresentativePoint(const OSMDataset& data, const AdminAreaRecord& area);
+
+std::vector<GeocodeCandidate> streetPlaceCandidates(const OSMDataset& data,
+                                                    const ForwardGeocodeIndex& index,
+                                                    const std::string& rawQuery,
+                                                    const QueryAnalysis& query,
+                                                    size_t limit,
+                                                    const std::unordered_set<uint64_t>& existingKeys,
+                                                    bool requireCompleteAdminMatch = false) {
     std::vector<GeocodeCandidate> output;
     if (query.hasNumber || query.hasPostcode || query.textTokens.size() < 2 || !index.available) {
         return output;
@@ -2794,36 +3120,90 @@ std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& da
 
     std::unordered_map<uint32_t, GeocodeCandidate> bestByStreet;
     constexpr size_t kMaxAnchorRefs = 250000;
-    constexpr size_t kMaxFallbackCandidates = 6000;
+    constexpr size_t kMaxStreetPlaceCandidates = 6000;
 
     for (const Split& split : splits) {
         if (split.streetTokens.empty() || split.placeTokens.empty()) {
             continue;
         }
-        const bool placeLooksLikeAdmin = hasAdminAreaForPlaceTokens(data, index, split.placeTokens);
+        std::vector<std::string> resolvedPlaceTokens = split.placeTokens;
+        bool placeLooksLikeAdmin = false;
+        for (const std::vector<std::string>& variant : englishGermanPlaceTokenVariants(split.placeTokens)) {
+            if (hasAdminAreaForExactPlaceTokens(data, index, variant)) {
+                resolvedPlaceTokens = variant;
+                placeLooksLikeAdmin = true;
+                break;
+            }
+        }
+        if (requireCompleteAdminMatch && !placeLooksLikeAdmin) {
+            continue;
+        }
 
         std::vector<const std::vector<GeocodeRef>*> postingLists;
+        std::vector<std::vector<GeocodeRef>> expandedStreetPostingLists;
         postingLists.reserve(split.streetTokens.size());
+        expandedStreetPostingLists.reserve(split.streetTokens.size());
         bool missingStreetToken = false;
         for (const std::string& token : split.streetTokens) {
-            const std::vector<GeocodeRef>* postings = findPostingList(index.context, token);
-            if (postings == nullptr) {
+            std::vector<std::string> alternatives{token};
+            for (const std::vector<std::string>& variant : englishGermanPlaceTokenVariants({token})) {
+                if (variant.size() == 1) {
+                    alternatives.push_back(variant.front());
+                }
+            }
+            for (const std::string& variant : germanInsertedEVariants(token)) {
+                alternatives.push_back(variant);
+            }
+            appendStreetFormAlternatives(alternatives, token);
+            uniqueTokens(alternatives);
+
+            std::vector<GeocodeRef> streetRefs;
+            for (const std::string& alternative : alternatives) {
+                const std::vector<GeocodeRef>* postings = findPostingList(index.context, alternative);
+                if (postings == nullptr) {
+                    continue;
+                }
+                const GeocodeRef firstStreet{kGeocodeStreet, 0};
+                const GeocodeRef afterLastStreet{kGeocodeAdmin, 0};
+                const auto begin = std::lower_bound(postings->begin(), postings->end(), firstStreet, geocodeRefLess);
+                const auto end = std::lower_bound(postings->begin(), postings->end(), afterLastStreet, geocodeRefLess);
+                streetRefs.insert(streetRefs.end(), begin, end);
+            }
+            if (streetRefs.empty()) {
                 missingStreetToken = true;
                 break;
             }
-            postingLists.push_back(postings);
+            std::sort(streetRefs.begin(), streetRefs.end(), geocodeRefLess);
+            streetRefs.erase(std::unique(streetRefs.begin(), streetRefs.end(), [](const GeocodeRef& left,
+                                                                                 const GeocodeRef& right) {
+                return left.type == right.type && left.index == right.index;
+            }), streetRefs.end());
+            expandedStreetPostingLists.push_back(std::move(streetRefs));
+            postingLists.push_back(&expandedStreetPostingLists.back());
         }
         if (missingStreetToken || postingLists.empty()) {
             continue;
         }
 
-        std::sort(postingLists.begin(), postingLists.end(), [](const auto* left, const auto* right) {
-            return left->size() < right->size();
+        const auto streetRange = [](const std::vector<GeocodeRef>& postings) {
+            const GeocodeRef firstStreet{kGeocodeStreet, 0};
+            const GeocodeRef afterLastStreet{kGeocodeAdmin, 0};
+            return std::make_pair(
+                std::lower_bound(postings.begin(), postings.end(), firstStreet, geocodeRefLess),
+                std::lower_bound(postings.begin(), postings.end(), afterLastStreet, geocodeRefLess));
+        };
+        std::sort(postingLists.begin(), postingLists.end(), [&](const auto* left, const auto* right) {
+            const auto leftRange = streetRange(*left);
+            const auto rightRange = streetRange(*right);
+            return std::distance(leftRange.first, leftRange.second) <
+                std::distance(rightRange.first, rightRange.second);
         });
-        if (postingLists.front()->size() > kMaxAnchorRefs) {
+        const auto anchorStreetRange = streetRange(*postingLists.front());
+        const size_t anchorRefCount = static_cast<size_t>(
+            std::distance(anchorStreetRange.first, anchorStreetRange.second));
+        if (anchorRefCount > kMaxAnchorRefs) {
             continue;
         }
-        const size_t anchorRefCount = postingLists.front()->size();
         const int rarityBonus =
             anchorRefCount <= 25 ? 150 :
             anchorRefCount <= 100 ? 125 :
@@ -2832,8 +3212,9 @@ std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& da
             anchorRefCount <= 10000 ? 35 : 0;
 
         size_t visited = 0;
-        for (const GeocodeRef& ref : *postingLists.front()) {
-            if (ref.type != kGeocodeStreet || ref.index >= data.streets.size()) {
+        for (auto anchorIt = anchorStreetRange.first; anchorIt != anchorStreetRange.second; ++anchorIt) {
+            const GeocodeRef& ref = *anchorIt;
+            if (ref.index >= data.streets.size()) {
                 continue;
             }
             bool matchedAllStreetTokens = true;
@@ -2849,7 +3230,7 @@ std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& da
             if (!matchedAllStreetTokens) {
                 continue;
             }
-            if (++visited > kMaxFallbackCandidates) {
+            if (++visited > kMaxStreetPlaceCandidates) {
                 break;
             }
 
@@ -2863,16 +3244,44 @@ std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& da
                 normalizeSearchText(rawQuery),
                 normalizeSearchText(data.resolve(street.name)));
             const std::vector<std::string> ownTokens = tokensFromText(data.resolve(street.name));
-            if (!containsAllTokens(ownTokens, split.streetTokens)) {
+            // Posting-list intersection above already proves that every street token,
+            // including its canonical spelling variants, belongs to this street.
+            const bool exactStreetTokenSet = ownTokens.size() == split.streetTokens.size();
+            const bool hasExplicitStreetForm = std::any_of(
+                split.streetTokens.begin(), split.streetTokens.end(), looksLikeStreetSearchToken);
+            if (requireCompleteAdminMatch && !exactStreetTokenSet && !hasExplicitStreetForm) {
                 continue;
             }
 
             const std::vector<std::string> adminTokens = adminTokensForLinks(data, data.streetAdminAreaIndexes,
                                                                             street.adminAreaOffset,
                                                                             street.adminAreaSize);
-            const uint16_t placeMatches = countMatchingSortedTokens(split.placeTokens, adminTokens);
+            const uint16_t placeMatches = countMatchingSortedTokens(resolvedPlaceTokens, adminTokens);
+            if (requireCompleteAdminMatch && placeMatches != resolvedPlaceTokens.size()) {
+                continue;
+            }
+            bool exactPlaceAdminName = false;
+            int exactPlaceProximityBonus = 0;
+            for (uint32_t i = 0; i < street.adminAreaSize; ++i) {
+                const size_t linkIndex = static_cast<size_t>(street.adminAreaOffset) + i;
+                if (linkIndex >= data.streetAdminAreaIndexes.size()) {
+                    continue;
+                }
+                const uint32_t areaIndex = data.streetAdminAreaIndexes[linkIndex];
+                if (areaIndex >= data.adminAreas.size()) {
+                    continue;
+                }
+                if (tokensFromText(data.resolve(data.adminAreas[areaIndex].name)) == resolvedPlaceTokens) {
+                    exactPlaceAdminName = true;
+                    const double centerDistance = distanceMeters(
+                        streetRepresentativePoint(data, street),
+                        adminRepresentativePoint(data, data.adminAreas[areaIndex]));
+                    exactPlaceProximityBonus = std::max(
+                        exactPlaceProximityBonus,
+                        std::max(0, 600 - static_cast<int>(centerDistance / 50.0)));
+                }
+            }
             const uint16_t fullQueryMatches = countMatchingSortedTokens(query.textTokens, ownTokens) + placeMatches;
-            const bool exactStreetTokenSet = ownTokens.size() == split.streetTokens.size();
             const bool streetNameLooksLikePlace =
                 query.textTokens.size() > ownTokens.size() &&
                 hasAdminAreaForPlaceTokens(data, index, ownTokens);
@@ -2887,6 +3296,8 @@ std::vector<GeocodeCandidate> streetPlaceFallbackCandidates(const OSMDataset& da
                 static_cast<int>(fullQueryMatches) * 6 +
                 (exactStreetTokenSet ? 30 : 0) +
                 (placeLooksLikeAdmin ? 240 : -110) +
+                (exactPlaceAdminName ? 900 : 0) +
+                exactPlaceProximityBonus +
                 rarityBonus +
                 (streetPhraseInQuery ? 220 + static_cast<int>(ownTokens.size()) * 160 : 0) +
                 (streetNameLooksLikePlace ? -360 : 0);
@@ -3106,7 +3517,90 @@ int bestTokenMatchQuality(const std::vector<std::string>& queryAlternatives,
     return best;
 }
 
+void appendStreetFormAlternatives(std::vector<std::string>& alternatives,
+                                  const std::string& token) {
+    if (token == "str" || token == "strasse" || token == "strasze") {
+        alternatives.push_back("street");
+        alternatives.push_back("strasse");
+        alternatives.push_back("strasze");
+    } else if (token == "street") {
+        alternatives.push_back("str");
+        alternatives.push_back("strasse");
+        alternatives.push_back("strasze");
+    }
+}
+
+bool streetNameMatchesSemanticQuery(const std::vector<std::string>& queryTokens,
+                                    const std::vector<std::string>& streetTokens) {
+    if (queryTokens.size() != streetTokens.size() || queryTokens.empty()) {
+        return false;
+    }
+    for (size_t i = 0; i < queryTokens.size(); ++i) {
+        if (queryTokens[i] == streetTokens[i]) {
+            continue;
+        }
+        std::vector<std::string> alternatives{queryTokens[i]};
+        appendStreetFormAlternatives(alternatives, queryTokens[i]);
+        if (!containsToken(alternatives, streetTokens[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<GeocodeCandidate> semanticStreetNameCandidates(
+    const OSMDataset& data,
+    const ForwardGeocodeIndex& index,
+    const QueryAnalysis& query,
+    size_t limit) {
+    std::vector<GeocodeCandidate> output;
+    if (query.hasNumber || query.hasPostcode || query.textTokens.size() < 2 ||
+        query.textTokens.size() > 5 || limit == 0) {
+        return output;
+    }
+
+    const std::vector<GeocodeRef>* anchor = nullptr;
+    for (const std::string& token : query.textTokens) {
+        if (looksLikeStreetSearchToken(token)) {
+            continue;
+        }
+        const std::vector<GeocodeRef>* postings = findPostingList(index.primary, token);
+        if (postings != nullptr && (anchor == nullptr || postings->size() < anchor->size())) {
+            anchor = postings;
+        }
+    }
+    if (anchor == nullptr || anchor->size() > 500000) {
+        return output;
+    }
+
+    constexpr size_t kMaxStreetRefsInspected = 100000;
+    size_t inspected = 0;
+    for (const GeocodeRef& ref : *anchor) {
+        if (ref.type != kGeocodeStreet || ref.index >= data.streets.size()) {
+            continue;
+        }
+        if (++inspected > kMaxStreetRefsInspected) {
+            break;
+        }
+        const std::vector<std::string> streetTokens = tokensFromText(data.resolve(data.streets[ref.index].name));
+        if (!streetNameMatchesSemanticQuery(query.textTokens, streetTokens)) {
+            continue;
+        }
+        output.push_back({kGeocodeStreet, ref.index,
+                          static_cast<uint16_t>(query.textTokens.size()), 3200});
+        if (output.size() >= limit * 4) {
+            break;
+        }
+    }
+    return output;
+}
+
 bool looksLikeStreetSearchToken(const std::string& token) {
+    if (token == "str" || token == "avenue" || token == "ave" ||
+        token == "boulevard" || token == "lane" || token == "drive" ||
+        token == "square") {
+        return true;
+    }
     if (token.size() < 4) {
         return false;
     }
@@ -3280,6 +3774,8 @@ std::vector<GeocodeCandidate> brandPlacePoiCandidates(const OSMDataset& data,
                                                                 split.placeTokens);
             const uint16_t brandMatches = countMatchingSortedTokens(split.brandTokens, ownTokens);
             const std::string label = normalizeSearchText(poiDisplayLabel(data, poi));
+            const std::string poiName = normalizeSearchText(data.resolve(poi.name));
+            const std::string poiBrand = normalizeSearchText(data.resolve(poi.brand));
             std::ostringstream brandPhraseStream;
             for (size_t i = 0; i < split.brandTokens.size(); ++i) {
                 if (i > 0) {
@@ -3287,7 +3783,9 @@ std::vector<GeocodeCandidate> brandPlacePoiCandidates(const OSMDataset& data,
                 }
                 brandPhraseStream << split.brandTokens[i];
             }
-            const bool brandPhraseInLabel = normalizedPhraseContains(label, brandPhraseStream.str());
+            const std::string brandPhrase = brandPhraseStream.str();
+            const bool brandPhraseInLabel = normalizedPhraseContains(label, brandPhrase);
+            const bool exactNamedPhrase = poiName == brandPhrase || poiBrand == brandPhrase;
 
             GeocodeCandidate candidate;
             candidate.type = kGeocodePoi;
@@ -3298,6 +3796,7 @@ std::vector<GeocodeCandidate> brandPlacePoiCandidates(const OSMDataset& data,
                 static_cast<int>(placeMatches) * 180 +
                 (brandFieldMatches ? 420 : 0) +
                 (brandPhraseInLabel ? 130 : 0) +
+                (exactNamedPhrase ? 1200 : 0) +
                 (!brandFieldMatches && split.brandTokens.size() == 1 && ownTokens.size() > 3 ? -220 : 0) +
                 (placeMatches == 0 ? -260 : 0);
 
@@ -3326,6 +3825,71 @@ std::vector<GeocodeCandidate> brandPlacePoiCandidates(const OSMDataset& data,
         output.resize(limit * 4);
     }
     return output;
+}
+
+bool hasNamedPoiEvidence(const OSMDataset& data,
+                         const ForwardGeocodeIndex& index,
+                         const std::string& poiName,
+                         const std::string& place) {
+    const std::vector<std::string> nameTokens = orderedSearchTokens(poiName);
+    if (nameTokens.empty()) {
+        return false;
+    }
+
+    std::vector<const std::vector<GeocodeRef>*> postingLists;
+    postingLists.reserve(nameTokens.size());
+    for (const std::string& token : nameTokens) {
+        const std::vector<GeocodeRef>* postings = findPostingList(index.primary, token);
+        if (postings == nullptr) {
+            return false;
+        }
+        postingLists.push_back(postings);
+    }
+    std::sort(postingLists.begin(), postingLists.end(), [](const auto* left, const auto* right) {
+        return left->size() < right->size();
+    });
+    if (postingLists.front()->size() > 1500000) {
+        return false;
+    }
+
+    const std::vector<std::string> placeTokens = orderedSearchTokens(place);
+    const std::string normalizedName = normalizeSearchText(poiName);
+    size_t inspected = 0;
+    for (const GeocodeRef& ref : *postingLists.front()) {
+        if (++inspected > 150000) {
+            break;
+        }
+        if (ref.type != kGeocodePoi || ref.index >= data.pois.size()) {
+            continue;
+        }
+        bool inEveryPosting = true;
+        for (size_t i = 1; i < postingLists.size(); ++i) {
+            if (!std::binary_search(postingLists[i]->begin(), postingLists[i]->end(), ref, geocodeRefLess)) {
+                inEveryPosting = false;
+                break;
+            }
+        }
+        if (!inEveryPosting) {
+            continue;
+        }
+
+        const PoiRecord& poi = data.pois[ref.index];
+        const std::string objectName = normalizeSearchText(data.resolve(poi.name));
+        const std::string objectBrand = normalizeSearchText(data.resolve(poi.brand));
+        const bool exactNamedEvidence = objectName == normalizedName || objectBrand == normalizedName ||
+            normalizedPhraseContains(objectName, normalizedName) ||
+            normalizedPhraseContains(objectBrand, normalizedName);
+        if (!exactNamedEvidence) {
+            continue;
+        }
+        if (!placeTokens.empty() &&
+            bestPlaceTokenMatches(data, data.poiAdminAreaIndexes,
+                                  poi.adminAreaOffset, poi.adminAreaSize, placeTokens) < placeTokens.size()) {
+            continue;
+        }
+        return true;
+    }
+    return false;
 }
 
 Coordinate streetRepresentativePoint(const OSMDataset& data, const StreetRecord& street) {
@@ -3666,10 +4230,10 @@ Server::Server(const OSMDataset& data, int port, int defaultHouseLimit)
     buildMetrics_.geocodeIndexBuildMs =
         std::chrono::duration<double, std::milli>(geocodeFinished - geocodeStarted).count();
 
-    std::cout << "Server index build timings:\n";
-    std::cout << "  Spatial indexes:             " << std::fixed << std::setprecision(3)
+    std::cout << "Server startup index metrics:\n";
+    std::cout << "  Spatial index build:         " << std::fixed << std::setprecision(3)
               << buildMetrics_.spatialIndexBuildMs << " ms\n";
-    std::cout << "  Forward geocode index:       " << buildMetrics_.geocodeIndexBuildMs << " ms\n";
+    std::cout << "  Embedded geocode attach:     " << buildMetrics_.geocodeIndexBuildMs << " ms\n";
     std::cout << "  Forward geocode terms:       "
               << (forwardIndex_ == nullptr ? 0 : forwardIndex_->context.size()) << "\n";
     std::cout << "  Forward geocode postings:    " << buildMetrics_.geocodePostingRefs << "\n";
@@ -3677,7 +4241,7 @@ Server::Server(const OSMDataset& data, int port, int defaultHouseLimit)
               << (forwardIndex_ == nullptr ? 0 : forwardIndex_->primary.size()) << "\n";
     std::cout << "  Primary geocode postings:    " << buildMetrics_.geocodePrimaryPostingRefs << "\n";
     std::cout << "  Largest geocode posting:     " << buildMetrics_.geocodeLargestPostingList << "\n";
-    std::cout << "  Estimated geocode index RAM: "
+    std::cout << "  Estimated geocode storage:   "
               << (static_cast<double>(buildMetrics_.geocodeEstimatedBytes) / (1024.0 * 1024.0))
               << " MB\n";
 }
@@ -4066,12 +4630,23 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
 
     if (path == "/api/geocode") {
         const auto queryIt = params.find("q") != params.end() ? params.find("q") : params.find("query");
-        if (queryIt == params.end() || queryIt->second.empty()) {
+        if (queryIt == params.end() || normalizeSearchText(queryIt->second).empty()) {
             return httpResponse(400, kJsonContentType, "{\"error\":\"missing q parameter\"}");
+        }
+        if (containsNegativeNumericToken(queryIt->second)) {
+            return httpResponse(400, kJsonContentType, "{\"error\":\"negative house numbers are invalid\"}");
         }
 
         const auto started = std::chrono::steady_clock::now();
         const QueryAnalysis query = analyzeQuery(queryIt->second);
+        if (isUnboundedGenericGeocodeQuery(query)) {
+            return httpResponse(400, kJsonContentType, "{\"error\":\"query is too broad\"}");
+        }
+        if (query.hasNumber && !query.hasPostcode && query.textTokens.size() == 1 &&
+            hasAdminAreaForExactPlaceTokens(data_, *forwardIndex_, query.textTokens)) {
+            return httpResponse(400, kJsonContentType,
+                "{\"error\":\"address query needs a street name\"}");
+        }
         const std::vector<std::string>& queryTokens = query.tokens;
         if (geocodeDebugEnabled()) {
             std::cerr << "[geocode-debug] start query=\"" << queryIt->second
@@ -4137,6 +4712,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             for (const std::string& variant : germanInsertedEVariants(token)) {
                 alternatives.push_back(variant);
             }
+            appendStreetFormAlternatives(alternatives, token);
             uniqueTokens(alternatives);
 
             const std::vector<GeocodeRef>* postings = findPostingList(searchIndex, token);
@@ -4369,6 +4945,8 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
                     }
                     const bool exactStreetName = normalizeSearchText(data_.resolve(street.name)) ==
                         normalizeSearchText(queryIt->second);
+                    const bool semanticStreetName = streetNameMatchesSemanticQuery(
+                        query.textTokens, streetTokens);
                     const bool streetPhraseInQuery = normalizedPhraseContains(
                         normalizeSearchText(queryIt->second),
                         normalizeSearchText(data_.resolve(street.name)));
@@ -4390,6 +4968,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
                         static_cast<int>(streetMatches) * 25 +
                         static_cast<int>(adminMatches) * 10 +
                         (exactStreetName ? 50 : 0) +
+                        (semanticStreetName ? 1100 : 0) +
                         (streetPhraseInQuery ? 620 + static_cast<int>(streetTokens.size()) * 240 : 0) +
                         (queryTokens.size() == 1 ? singleTokenQuality * 3 : 0) +
                         (streetNameLooksLikePlace ? -420 : 0) +
@@ -4461,8 +5040,15 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
                                                                                     poi.adminAreaSize);
                     const uint16_t poiMatches = countMatchingSortedTokens(query.textTokens, poiTokens);
                     const uint16_t adminMatches = bestTokenMatchesWithPlaceVariants(query.textTokens, adminTokens);
-                    const bool exactPoiName = normalizeSearchText(poiDisplayLabel(data_, poi)) ==
-                        normalizeSearchText(queryIt->second);
+                    const std::string normalizedPoiLabel = normalizeSearchText(poiDisplayLabel(data_, poi));
+                    const std::string normalizedPoiName = normalizeSearchText(data_.resolve(poi.name));
+                    const std::string normalizedPoiBrand = normalizeSearchText(data_.resolve(poi.brand));
+                    const bool exactPoiName = normalizedPoiLabel == normalizedQueryText;
+                    const bool namedPhraseInQuery =
+                        (!normalizedPoiName.empty() && normalizedPoiName.size() >= 3 &&
+                         normalizedPhraseContains(normalizedQueryText, normalizedPoiName)) ||
+                        (!normalizedPoiBrand.empty() && normalizedPoiBrand.size() >= 3 &&
+                         normalizedPhraseContains(normalizedQueryText, normalizedPoiBrand));
                     const int textRelevance = poiTextRelevance(data_, poi, query.textTokens, normalizedQueryText);
                     const int typeScore = poiQueryTypeScore(data_, poi, query.textTokens);
                     const double focusDistance = hasFocusPoint ? distanceMeters(focusPoint, poi.point) : -1.0;
@@ -4475,6 +5061,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
                         static_cast<int>(poiMatches) * 30 +
                         static_cast<int>(adminMatches) * 12 +
                         (exactPoiName ? 55 : 0) +
+                        (namedPhraseInQuery ? 1100 : 0) +
                         textRelevance +
                         typeScore +
                         focusScore +
@@ -4493,9 +5080,158 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             }
         }
 
+        bool addressPlanApplied = false;
+        bool exactHouseFound = false;
+        bool streetLevelFallback = false;
+        std::string addressResolution = "not_address";
+        std::string addressResolutionMessage;
+        if (query.hasNumber && query.numberTokens.size() == 1 && query.textTokens.size() >= 2) {
+            const bool hasRecognizedAdminContext = containsAdminPlaceToken(
+                data_, *forwardIndex_, query.textTokens);
+            const bool hasExplicitStreetForm = std::any_of(
+                query.textTokens.begin(), query.textTokens.end(), looksLikeStreetSearchToken);
+            std::vector<std::string> orderedAddressTokens;
+            for (const std::string& token : orderedSearchTokens(queryIt->second)) {
+                if (!isNumberToken(token) && !isPostcodeToken(token)) {
+                    orderedAddressTokens.push_back(token);
+                }
+            }
+            const std::string addressText = joinTokens(orderedAddressTokens, 0, orderedAddressTokens.size());
+            const QueryAnalysis addressTextQuery = analyzeQuery(addressText);
+            const std::unordered_set<uint64_t> noExistingResults;
+            std::vector<GeocodeCandidate> plannedStreets = streetPlaceCandidates(
+                data_, *forwardIndex_, addressText, addressTextQuery,
+                static_cast<size_t>(limit), noExistingResults, true);
+            std::vector<GeocodeCandidate> adminValidatedStreets = streetPlaceCandidates(
+                data_, *forwardIndex_, addressText, addressTextQuery,
+                static_cast<size_t>(limit), noExistingResults, false);
+            if (hasRecognizedAdminContext) {
+                adminValidatedStreets.erase(std::remove_if(adminValidatedStreets.begin(), adminValidatedStreets.end(),
+                    [&](const GeocodeCandidate& candidate) {
+                        if (candidate.index >= data_.streets.size()) {
+                            return true;
+                        }
+                        const StreetRecord& street = data_.streets[candidate.index];
+                        for (uint32_t i = 0; i < street.adminAreaSize; ++i) {
+                            const size_t linkIndex = static_cast<size_t>(street.adminAreaOffset) + i;
+                            if (linkIndex >= data_.streetAdminAreaIndexes.size()) {
+                                continue;
+                            }
+                            const uint32_t areaIndex = data_.streetAdminAreaIndexes[linkIndex];
+                            if (areaIndex >= data_.adminAreas.size()) {
+                                continue;
+                            }
+                            const std::vector<std::string> areaTokens =
+                                tokensFromText(data_.resolve(data_.adminAreas[areaIndex].name));
+                            for (const std::vector<std::string>& variant :
+                                 englishGermanPlaceTokenVariants(areaTokens)) {
+                                if (!variant.empty() && containsAllTokens(addressTextQuery.textTokens, variant)) {
+                                    return false;
+                                }
+                            }
+                        }
+                        return true;
+                    }), adminValidatedStreets.end());
+            }
+            std::unordered_set<uint64_t> plannedStreetKeys;
+            plannedStreetKeys.reserve(plannedStreets.size() + adminValidatedStreets.size());
+            for (const GeocodeCandidate& candidate : plannedStreets) {
+                plannedStreetKeys.insert(geocodeKey(candidate.type, candidate.index));
+            }
+            for (const GeocodeCandidate& candidate : adminValidatedStreets) {
+                if (plannedStreetKeys.insert(geocodeKey(candidate.type, candidate.index)).second) {
+                    plannedStreets.push_back(candidate);
+                }
+            }
+
+            if (!plannedStreets.empty()) {
+                addressPlanApplied = true;
+                std::unordered_set<std::string> plannedStreetNames;
+                std::unordered_set<uint32_t> plannedLocalAdminAreas;
+                plannedStreetNames.reserve(plannedStreets.size());
+                for (const GeocodeCandidate& candidate : plannedStreets) {
+                    if (candidate.index < data_.streets.size()) {
+                        const StreetRecord& street = data_.streets[candidate.index];
+                        plannedStreetNames.insert(normalizeSearchText(data_.resolve(street.name)));
+                        for (uint32_t i = 0; i < street.adminAreaSize; ++i) {
+                            const size_t linkIndex = static_cast<size_t>(street.adminAreaOffset) + i;
+                            if (linkIndex >= data_.streetAdminAreaIndexes.size()) {
+                                continue;
+                            }
+                            const uint32_t areaIndex = data_.streetAdminAreaIndexes[linkIndex];
+                            if (areaIndex < data_.adminAreas.size() && data_.adminAreas[areaIndex].adminLevel >= 6) {
+                                plannedLocalAdminAreas.insert(areaIndex);
+                            }
+                        }
+                    }
+                }
+
+                std::vector<GeocodeCandidate> exactHouses;
+                exactHouses.reserve(results.size());
+                for (GeocodeCandidate candidate : results) {
+                    if (candidate.type != kGeocodeHouse || candidate.index >= data_.houses.size()) {
+                        continue;
+                    }
+                    const HouseRecord& house = data_.houses[candidate.index];
+                    const std::string normalizedHouseNumber = normalizeSearchText(data_.resolve(house.houseNumber));
+                    const std::string normalizedStreet = normalizeSearchText(data_.resolve(house.streetName));
+                    bool sharesLocalAdminArea = plannedLocalAdminAreas.empty();
+                    for (uint32_t i = 0; !sharesLocalAdminArea && i < house.adminAreaSize; ++i) {
+                        const size_t linkIndex = static_cast<size_t>(house.adminAreaOffset) + i;
+                        if (linkIndex < data_.houseAdminAreaIndexes.size() &&
+                            plannedLocalAdminAreas.find(data_.houseAdminAreaIndexes[linkIndex]) != plannedLocalAdminAreas.end()) {
+                            sharesLocalAdminArea = true;
+                        }
+                    }
+                    if (normalizedHouseNumber == query.numberTokens.front() &&
+                        plannedStreetNames.find(normalizedStreet) != plannedStreetNames.end() &&
+                        sharesLocalAdminArea) {
+                        candidate.score += 10000;
+                        exactHouses.push_back(candidate);
+                    }
+                }
+                exactHouseFound = !exactHouses.empty();
+
+                if (requestedType == 0 || requestedType == kGeocodeHouse) {
+                    if (exactHouseFound) {
+                        results = std::move(exactHouses);
+                        addressResolution = "exact_house";
+                        addressResolutionMessage = "Exact house point found.";
+                    } else if (requestedType == 0) {
+                        results = std::move(plannedStreets);
+                        streetLevelFallback = true;
+                        addressResolution = "street_level";
+                        addressResolutionMessage = "Exact house point not found. Showing the matching street.";
+                    } else {
+                        results.clear();
+                        addressResolution = "house_not_found";
+                        addressResolutionMessage = "Exact house point not found.";
+                    }
+                } else if (requestedType == kGeocodeStreet) {
+                    results = std::move(plannedStreets);
+                    addressResolution = exactHouseFound ? "street_requested" : "street_level";
+                    streetLevelFallback = !exactHouseFound;
+                    addressResolutionMessage = exactHouseFound
+                        ? "A matching house exists, but the street result type was requested."
+                        : "Exact house point not found. Showing the matching street.";
+                } else {
+                    results.clear();
+                    addressResolution = exactHouseFound ? "exact_house_filtered" : "house_not_found";
+                    addressResolutionMessage = exactHouseFound
+                        ? "A matching house exists, but it is excluded by the selected result type."
+                        : "Exact house point not found.";
+                }
+            } else if (hasRecognizedAdminContext && hasExplicitStreetForm) {
+                addressPlanApplied = true;
+                results.clear();
+                addressResolution = "address_not_found";
+                addressResolutionMessage = "No matching house or street was found in the requested administrative area.";
+            }
+        }
+
         if (!query.hasNumber && !query.hasPostcode && queryTokens.size() >= 2) {
             if (geocodeDebugEnabled()) {
-                std::cerr << "[geocode-debug] before street-place fallback results="
+                std::cerr << "[geocode-debug] before street-place candidates results="
                           << results.size() << "\n" << std::flush;
             }
             std::unordered_set<uint64_t> resultKeys;
@@ -4503,23 +5239,37 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             for (const GeocodeCandidate& result : results) {
                 resultKeys.insert(geocodeKey(result.type, result.index));
             }
-            std::vector<GeocodeCandidate> fallback =
-                streetPlaceFallbackCandidates(data_, *forwardIndex_, queryIt->second, query, static_cast<size_t>(limit), resultKeys);
-            for (const GeocodeCandidate& candidate : fallback) {
+            std::vector<GeocodeCandidate> streetPlace =
+                streetPlaceCandidates(data_, *forwardIndex_, queryIt->second, query, static_cast<size_t>(limit), resultKeys);
+            for (const GeocodeCandidate& candidate : streetPlace) {
                 const uint64_t key = geocodeKey(candidate.type, candidate.index);
                 if (resultKeys.insert(key).second) {
                     results.push_back(candidate);
                 }
             }
             if (geocodeDebugEnabled()) {
-                std::cerr << "[geocode-debug] after street-place fallback results="
+                std::cerr << "[geocode-debug] after street-place candidates results="
                           << results.size() << "\n" << std::flush;
+            }
+
+            std::vector<GeocodeCandidate> semanticStreet = semanticStreetNameCandidates(
+                data_, *forwardIndex_, query, static_cast<size_t>(limit));
+            for (const GeocodeCandidate& candidate : semanticStreet) {
+                const auto existing = std::find_if(results.begin(), results.end(), [&](const GeocodeCandidate& result) {
+                    return result.type == candidate.type && result.index == candidate.index;
+                });
+                if (existing == results.end()) {
+                    results.push_back(candidate);
+                } else {
+                    existing->score = std::max(existing->score, candidate.score);
+                    existing->matchedTokens = std::max(existing->matchedTokens, candidate.matchedTokens);
+                }
             }
         }
 
         if (!query.hasNumber && !query.hasPostcode && queryTokens.size() >= 2) {
             if (geocodeDebugEnabled()) {
-                std::cerr << "[geocode-debug] before brand-place fallback results="
+                std::cerr << "[geocode-debug] before brand-place candidates results="
                           << results.size() << "\n" << std::flush;
             }
             std::unordered_set<uint64_t> resultKeys;
@@ -4531,7 +5281,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
                 brandPlacePoiCandidates(data_, *forwardIndex_, queryIt->second, query, static_cast<size_t>(limit), resultKeys);
             results.insert(results.end(), brandPlace.begin(), brandPlace.end());
             if (geocodeDebugEnabled()) {
-                std::cerr << "[geocode-debug] after brand-place fallback results="
+                std::cerr << "[geocode-debug] after brand-place candidates results="
                           << results.size() << "\n" << std::flush;
             }
         }
@@ -4627,6 +5377,11 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
         json << "\"queryTimeMs\":" << std::fixed << std::setprecision(3) << elapsedMs << ",";
         json << "\"indexMode\":\"" << (usePrimaryIndex ? "primary" : "context") << "\",";
         json << "\"resultTypeFilter\":\"" << geocodeTypeFilterName(requestedType) << "\",";
+        json << "\"addressPlanApplied\":" << (addressPlanApplied ? "true" : "false") << ",";
+        json << "\"addressResolution\":\"" << addressResolution << "\",";
+        json << "\"exactHouseFound\":" << (exactHouseFound ? "true" : "false") << ",";
+        json << "\"streetLevelFallback\":" << (streetLevelFallback ? "true" : "false") << ",";
+        json << "\"addressResolutionMessage\":\"" << jsonEscape(addressResolutionMessage) << "\",";
         json << "\"inspectedPostingRefs\":" << inspectedPostingRefs << ",";
         json << "\"anchorPostingRefs\":" << anchorPostingRefs << ",";
         json << "\"candidateCountBeforeRanking\":" << candidates.size() << ",";
@@ -4683,7 +5438,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
 
     if (path == "/api/natural-geocode") {
         const auto queryIt = params.find("q") != params.end() ? params.find("q") : params.find("query");
-        if (queryIt == params.end() || queryIt->second.empty()) {
+        if (queryIt == params.end() || normalizeSearchText(queryIt->second).empty()) {
             return httpResponse(400, kJsonContentType, "{\"error\":\"missing q parameter\"}");
         }
 
@@ -4691,68 +5446,55 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
         const bool useLlm = params.find("useLlm") != params.end() &&
             (params.at("useLlm") == "1" || params.at("useLlm") == "true");
         NaturalIntent deterministicIntent = parseDeterministicNaturalIntent(queryIt->second);
-        NaturalIntent intent = useLlm ? parseOllamaIntent(queryIt->second) : NaturalIntent{};
-        if (useLlm && deterministicIntent.type == NaturalIntentType::NamedPoiInPlace &&
-            intent.type != NaturalIntentType::NamedPoiInPlace) {
-            const bool llmWasUsed = intent.fromLlm;
-            const bool llmWasVerified = intent.verifiedByLlm;
-            const int llmVerificationPasses = intent.verificationPasses;
-            const NaturalIntent llmDebugIntent = intent;
-            intent = deterministicIntent;
-            intent.fromLlm = llmWasUsed;
-            intent.verifiedByLlm = llmWasVerified || (llmWasUsed && llmVerificationPasses >= 2);
-            intent.verificationPasses = llmVerificationPasses;
-            copyLlmDebugFields(intent, llmDebugIntent);
+        NaturalIntent intent = useLlm ? parseOllamaIntent(queryIt->second) : deterministicIntent;
+        const std::string explicitPlace = explicitPlaceRestrictionFromQuery(
+            data_, forwardIndex_, queryIt->second);
+        if (deterministicIntent.type == NaturalIntentType::NamedPoiInPlace &&
+            deterministicIntent.place.empty()) {
+            deterministicIntent.place = explicitPlace;
         }
-        if (useLlm && deterministicIntent.type == NaturalIntentType::NamedPoiInPlace &&
+        if (intent.type == NaturalIntentType::NamedPoiInPlace && intent.place.empty()) {
+            intent.place = explicitPlace;
+        }
+
+        const std::string paddedNaturalQuery = " " + normalizeSearchText(queryIt->second) + " ";
+        const std::string explicitReferenceCategory = referenceCategoryFromText(queryIt->second);
+        const bool explicitNamedPoiPreposition = explicitReferenceCategory.empty() &&
+            (paddedNaturalQuery.find(" at ") != std::string::npos ||
+             paddedNaturalQuery.find(" bei ") != std::string::npos);
+        const bool deterministicNamedPoiEligible =
+            explicitReferenceCategory.empty() &&
+            inferProductFamilyFromQuery(queryIt->second).empty() &&
+            inferExplicitServiceConceptFromQuery(queryIt->second).empty() &&
+            inferTargetConceptFromQuery(queryIt->second).empty();
+        const bool deterministicNamedPoiSupported =
+            (deterministicNamedPoiEligible || explicitNamedPoiPreposition) &&
+            deterministicIntent.type == NaturalIntentType::NamedPoiInPlace &&
+            forwardIndex_ != nullptr && forwardIndex_->available &&
+            hasNamedPoiEvidence(data_, *forwardIndex_, deterministicIntent.poiName,
+                                deterministicIntent.place);
+        const bool llmNamedPoiSupported =
             intent.type == NaturalIntentType::NamedPoiInPlace &&
-            (deterministicIntent.poiName.find('&') != std::string::npos ||
-             deterministicIntent.poiName.find('\'') != std::string::npos ||
-             deterministicIntent.poiName.find('-') != std::string::npos)) {
-            intent.poiName = deterministicIntent.poiName;
-            if (intent.place.empty()) {
-                intent.place = deterministicIntent.place;
-            }
-        }
-        if (useLlm && deterministicIntent.type == NaturalIntentType::NearestCategoryToAddress &&
-            !deterministicIntent.category.empty() &&
-            (intent.type != NaturalIntentType::NearestCategoryToAddress ||
-             intent.category != deterministicIntent.category)) {
+            forwardIndex_ != nullptr && forwardIndex_->available &&
+            hasNamedPoiEvidence(data_, *forwardIndex_, intent.poiName, intent.place);
+        const bool llmReclassifiedExplicitNameAsConcept = deterministicNamedPoiEligible &&
+            deterministicIntent.type == NaturalIntentType::NamedPoiInPlace &&
+            (intent.type == NaturalIntentType::NearestConceptToAddress ||
+             intent.type == NaturalIntentType::NearestCategoryToAddress);
+        if (useLlm && (deterministicNamedPoiSupported || llmReclassifiedExplicitNameAsConcept) &&
+            !llmNamedPoiSupported) {
+            const NaturalIntent llmDebugIntent = intent;
             const bool llmWasUsed = intent.fromLlm;
             const bool llmWasVerified = intent.verifiedByLlm;
             const int llmVerificationPasses = intent.verificationPasses;
-            const NaturalIntent llmDebugIntent = intent;
             intent = deterministicIntent;
             intent.fromLlm = llmWasUsed;
-            intent.verifiedByLlm = llmWasVerified || (llmWasUsed && llmVerificationPasses >= 2);
+            intent.verifiedByLlm = llmWasVerified;
             intent.verificationPasses = llmVerificationPasses;
-            copyLlmDebugFields(intent, llmDebugIntent);
-        }
-        if (useLlm && deterministicIntent.type == NaturalIntentType::NearestConceptToAddress &&
-            !deterministicIntent.concept.empty() &&
-            intent.type != NaturalIntentType::NamedPoiInPlace &&
-            (intent.type != NaturalIntentType::NearestConceptToAddress ||
-             intent.concept != deterministicIntent.concept ||
-             intent.productFamily != deterministicIntent.productFamily)) {
-            const bool llmWasUsed = intent.fromLlm;
-            const bool llmWasVerified = intent.verifiedByLlm;
-            const int llmVerificationPasses = intent.verificationPasses;
-            const NaturalIntent llmDebugIntent = intent;
-            intent = deterministicIntent;
-            intent.fromLlm = llmWasUsed;
-            intent.verifiedByLlm = llmWasVerified || (llmWasUsed && llmVerificationPasses >= 2);
-            intent.verificationPasses = llmVerificationPasses;
-            copyLlmDebugFields(intent, llmDebugIntent);
-        }
-        if (intent.type == NaturalIntentType::Unknown) {
-            const bool llmWasUsed = intent.fromLlm;
-            const bool llmWasVerified = intent.verifiedByLlm;
-            const int llmVerificationPasses = intent.verificationPasses;
-            const NaturalIntent llmDebugIntent = intent;
-            intent = deterministicIntent;
-            intent.fromLlm = llmWasUsed;
-            intent.verifiedByLlm = llmWasVerified || (llmWasUsed && llmVerificationPasses >= 2);
-            intent.verificationPasses = llmVerificationPasses;
+            intent.backendCorrected = true;
+            intent.backendCorrectionReason = deterministicNamedPoiSupported
+                ? "named POI phrase validated against loaded OSM name, brand, and administrative data"
+                : "explicit named-entity grammar preserved because no recognized product, service, or category was present";
             copyLlmDebugFields(intent, llmDebugIntent);
         }
         if (intent.type == NaturalIntentType::Unknown) {
@@ -4776,19 +5518,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             }
 
             ServerResponse response = handleRequest("/api/geocode", geocodeParams);
-            Coordinate firstPoint;
             std::string originSource = "address";
-            if (response.statusCode == 200 && !extractFirstLatLon(response.body, firstPoint)) {
-                const std::string streetLevelAddress = addressWithoutHouseNumber(queryIt->second);
-                if (!streetLevelAddress.empty()) {
-                    geocodeParams["q"] = streetLevelAddress;
-                    const ServerResponse streetResponse = handleRequest("/api/geocode", geocodeParams);
-                    if (streetResponse.statusCode == 200 && extractFirstLatLon(streetResponse.body, firstPoint)) {
-                        response = streetResponse;
-                        originSource = "address_street";
-                    }
-                }
-            }
             if (response.statusCode == 200) {
                 const std::string prefix = "{\"naturalIntent\":\"address\",\"usedLlm\":";
                 response.body.replace(0, 1, prefix + std::string(intent.fromLlm ? "true" : "false") +
@@ -4849,16 +5579,6 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             const ServerResponse addressResponse = handleRequest("/api/geocode", addressParams);
             if (addressResponse.statusCode == 200 && extractFirstLatLon(addressResponse.body, origin)) {
                 originSource = "address";
-            }
-            if (originSource.empty()) {
-                const std::string streetLevelAddress = addressWithoutHouseNumber(intent.address);
-                if (!streetLevelAddress.empty()) {
-                    addressParams["q"] = streetLevelAddress;
-                    const ServerResponse streetAddressResponse = handleRequest("/api/geocode", addressParams);
-                    if (streetAddressResponse.statusCode == 200 && extractFirstLatLon(streetAddressResponse.body, origin)) {
-                        originSource = "address_street";
-                    }
-                }
             }
         }
         if (originSource.empty() && coordinateFromLatLonParams(params, origin)) {
@@ -5274,7 +5994,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
         constexpr double kCloseStreetMeters = 50.0;
         constexpr double kDirectHouseMeters = 3.0;
         constexpr double kDirectStreetMeters = 15.0;
-        constexpr double kFallbackHouseMeters = 300.0;
+        constexpr double kExtendedHouseMeters = 300.0;
         constexpr double kLooseObjectMeters = 1000.0;
 
         std::string resultType = "none";
@@ -5301,7 +6021,7 @@ Server::ServerResponse Server::handleRequest(const std::string& path,
             resultType = "street";
             label = streetDisplayLabel(data_, data_.streets[streetResult.index]);
             resultDistance = streetResult.distanceMeters;
-        } else if (houseResult.found && houseResult.distanceMeters <= kFallbackHouseMeters) {
+        } else if (houseResult.found && houseResult.distanceMeters <= kExtendedHouseMeters) {
             resultType = "house";
             label = houseAddressLine(data_, data_.houses[houseResult.index]);
             resultDistance = houseResult.distanceMeters;

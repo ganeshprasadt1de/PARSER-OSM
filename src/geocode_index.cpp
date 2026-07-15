@@ -183,6 +183,7 @@ bool appendUtf8Replacement(const std::string& input, size_t& index, std::string&
         if (current == 0xC3) {
             switch (next) {
                 case 0x84: case 0xA4: output += "ae"; index += 2; return true;
+                case 0x89: case 0xA9: output += "e"; index += 2; return true;
                 case 0x96: case 0xB6: output += "oe"; index += 2; return true;
                 case 0x9C: case 0xBC: output += "ue"; index += 2; return true;
                 case 0x9F: output += "ss"; index += 2; return true;

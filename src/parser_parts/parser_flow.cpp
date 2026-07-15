@@ -784,16 +784,17 @@ void Parser::printStats() const {
     std::cout << "  Dataset extraction:          " << data_.stats.extractionSeconds << " s\n";
     std::cout << "  Boundary assembly:           " << data_.stats.relationAssemblySeconds << " s\n";
     std::cout << "  Admin attribute lookup:      " << data_.stats.adminAttributionSeconds << " s\n";
-    std::cout << "  Total time:                  " << data_.stats.totalSeconds
+    std::cout << "  Street connection:           " << data_.stats.connectionSeconds << " s\n";
+    std::cout << "  PBF extraction total:        " << data_.stats.totalSeconds
               << " s (" << totalMinutes << " min)\n";
 
     std::cout << "\nPerformance\n";
     std::cout << std::setprecision(2);
-    std::cout << "  Input size:                  " << data_.stats.inputFileMB << " MB\n";
-    std::cout << "  Input throughput:            " << data_.stats.inputMegabytesPerSecond << " MB/s\n";
+    std::cout << "  PBF input size:              " << data_.stats.inputFileMB << " MB\n";
+    std::cout << "  PBF extraction throughput:   " << data_.stats.inputMegabytesPerSecond << " MB/s\n";
 
     std::cout << "\nMemory\n";
-    std::cout << "  Compact dataset size:        " << data_.stats.datasetMB << " MB\n";
-    std::cout << "  Peak RSS:                    " << data_.stats.rssPeakMB << " MB\n";
+    std::cout << "  Estimated dataset storage:   " << data_.stats.datasetMB << " MB\n";
+    std::cout << "  PBF extraction peak RSS:     " << data_.stats.rssPeakMB << " MB\n";
     std::cout << "===============================\n";
 }

@@ -14,14 +14,6 @@ docs/osm_program_explained.pdf
 
 That PDF explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, binary snapshot format, and memory layout with diagrams.
 
-The sheet-task audit report is included here:
-
-```text
-docs/sheet_task_audit.pdf
-```
-
-That PDF checks Sheet 1, Sheet 2, and Sheet 3 task coverage against the Europe binary snapshot. It lists ten probes per task, records the observed runtime behavior, and marks optional tasks that are not implemented.
-
 ## Index
 
 1. [What You Need To Download](#1-what-you-need-to-download)
@@ -51,7 +43,7 @@ That PDF checks Sheet 1, Sheet 2, and Sheet 3 task coverage against the Europe b
 25. [Ollama Environment Variables](#25-ollama-environment-variables)
 26. [Console Progress And Metrics](#26-console-progress-and-metrics)
 27. [GeoJSON Export](#27-geojson-export)
-28. [Included Reports](#28-included-reports)
+28. [Program Manual](#28-program-manual)
 29. [Main Source Files](#29-main-source-files)
 30. [Troubleshooting](#30-troubleshooting)
 31. [Quick Command Template](#31-quick-command-template)
@@ -70,7 +62,7 @@ Clone the repository:
 
 ```bash
 git clone <repository-url>
-cd PARSER-OSM
+cd osm_project
 ```
 
 Replace `<repository-url>` with the GitHub URL shown by the green `Code` button on the repository page.
@@ -78,7 +70,7 @@ Replace `<repository-url>` with the GitHub URL shown by the green `Code` button 
 If you already have the repository:
 
 ```bash
-cd /path/to/PARSER-OSM
+cd /path/to/osm_project
 git pull origin main
 ```
 
@@ -95,14 +87,14 @@ For a first run, use Baden-Wuerttemberg. Europe is much larger and takes longer 
 Example:
 
 ```bash
-cd /path/to/osm-task1
+cd /path/to/osm_project
 wget https://download.geofabrik.de/europe/germany/baden-wuerttemberg-latest.osm.pbf
 ```
 
 Europe example:
 
 ```bash
-cd /path/to/osm-task1
+cd /path/to/osm_project
 wget https://download.geofabrik.de/europe-latest.osm.pbf
 ```
 
@@ -123,8 +115,8 @@ The deterministic forward geocoder and reverse geocoder do not need Ollama. Olla
 On Ubuntu 22.04 or WSL Ubuntu 22.04, the examples below use this layout:
 
 ```text
-/path/to/osm-task1                 repository
-/path/to/osm-task1-build           CMake build folder
+/path/to/osm_project                 repository
+/path/to/osm_project-build           CMake build folder
 /path/to/output/baden-geocoder.bin        Baden-Wuerttemberg binary snapshot
 /path/to/output/europe-geocoder.bin       Europe binary snapshot
 ```
@@ -134,7 +126,7 @@ You can use different paths. If you do, replace the paths in the commands.
 If you keep a Windows copy, a generic path looks like this:
 
 ```text
-C:\path\to\osm-task1
+C:\path\to\osm_project
 ```
 
 Run parsing and server commands from Ubuntu/WSL for best performance. Avoid parsing through `/mnt/c/...` when possible, because WSL file access through the Windows mount can be slower. Keeping the repository and PBF inside the Linux filesystem, for example under `$HOME/...`, is usually faster.
@@ -205,26 +197,26 @@ The frontend also has a `Start Ollama Service` button under the geocoder. It cal
 From the repository folder:
 
 ```bash
-cd /path/to/osm-task1
-cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build /path/to/osm-task1-build
+cd /path/to/osm_project
+cmake -S . -B /path/to/osm_project-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build /path/to/osm_project-build
 ```
 
 The executable will be:
 
 ```text
-/path/to/osm-task1-build/osm_parser
+/path/to/osm_project-build/osm_parser
 ```
 
 If CMake cannot find bundled libosmium or protozero, give the include paths explicitly:
 
 ```bash
-cd /path/to/osm-task1
-rm -rf /path/to/osm-task1-build
-cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cd /path/to/osm_project
+rm -rf /path/to/osm_project-build
+cmake -S . -B /path/to/osm_project-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLIBOSMIUM_INCLUDE_DIR="$PWD/third_party/libosmium/include" \
   -DPROTOZERO_INCLUDE_DIR="$PWD/third_party/protozero/include"
-cmake --build /path/to/osm-task1-build
+cmake --build /path/to/osm_project-build
 ```
 
 ## 6. Parse A PBF Into A Binary Snapshot
@@ -236,8 +228,8 @@ Parsing reads the `.osm.pbf`, extracts the reduced dataset, builds the forward-g
 Use this for correctness checks and normal development:
 
 ```bash
-cd /path/to/osm-task1
-/path/to/osm-task1-build/osm_parser \
+cd /path/to/osm_project
+/path/to/osm_project-build/osm_parser \
   --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
   --low-memory \
   --connect-streets \
@@ -250,8 +242,8 @@ cd /path/to/osm-task1
 Europe is much larger. Use `--low-memory` on normal laptop hardware:
 
 ```bash
-cd /path/to/osm-task1
-/path/to/osm-task1-build/osm_parser \
+cd /path/to/osm_project
+/path/to/osm_project-build/osm_parser \
   --parse /path/to/data/europe-latest.osm.pbf \
   --low-memory \
   --connect-streets \
@@ -272,11 +264,11 @@ The parser prints phase progress, elapsed time, throughput, ETA where possible, 
 Start the server from a binary snapshot:
 
 ```bash
-cd /path/to/osm-task1
+cd /path/to/osm_project
 OSM_OLLAMA_MODEL=qwen2.5:3b \
 OSM_OLLAMA_HOST=127.0.0.1 \
 OSM_OLLAMA_TIMEOUT_SECONDS=30 \
-/path/to/osm-task1-build/osm_parser \
+/path/to/osm_project-build/osm_parser \
   --load-binary /path/to/output/europe-geocoder.bin \
   --server 8080
 ```
@@ -290,9 +282,9 @@ http://localhost:8080
 To run without automatic Ollama startup:
 
 ```bash
-cd /path/to/osm-task1
+cd /path/to/osm_project
 OSM_AUTO_OLLAMA=0 \
-/path/to/osm-task1-build/osm_parser \
+/path/to/osm_project-build/osm_parser \
   --load-binary /path/to/output/europe-geocoder.bin \
   --server 8080
 ```
@@ -384,7 +376,7 @@ Street identity is taken from the first available value:
 2. `official_name`
 3. `ref`
 
-The `ref` fallback matters for roads such as `A 5`, `B 35`, or `L 558`.
+The `ref` field matters for roads whose route reference is their usable label, such as motorway, federal-road, and state-road numbers.
 
 The parser skips area-like highway objects because a plaza polygon is not a street centerline. It also skips highway types that are not useful for the displayed street layer, such as footways, cycleways, steps, platforms, corridors, proposed roads, and construction roads.
 
@@ -467,7 +459,7 @@ Selection order:
 2. direct street click near a street line
 3. close street
 4. close house
-5. fallback nearby house
+5. wider nearby-house search
 6. containing administrative area
 7. nearest administrative boundary when outside all stored areas
 
@@ -484,13 +476,13 @@ The response can include:
 
 ## 15. Forward Geocoder
 
-The forward geocoder answers text queries such as:
+The forward geocoder accepts four useful query shapes:
 
 ```text
-Hauptstrasse 10 Aalen
-Stuttgart
-Kaistrasse 5 Kiel
-Burger King Stuttgart
+<street name> <house number> <place or postcode>
+<street name> <place>
+<place name>
+<POI or brand name> <place>
 ```
 
 Endpoint:
@@ -515,6 +507,25 @@ Two posting indexes are stored:
 
 This prevents a single-token query such as `Stuttgart` from returning every house located inside Stuttgart before returning the city or direct POI/name matches.
 
+### 15.1 Structured Address Planning
+
+A numbered query is parsed as an address instead of being matched as one undivided phrase:
+
+1. numeric tokens are separated as the house number or postcode
+2. exact administrative-place tokens are resolved from the loaded admin index
+3. the remaining ordered words become the street phrase
+4. street candidates must match that phrase and the requested administrative context
+5. house candidates must match the street, number, and administrative context
+6. a house result is returned only when the stored OSM address fields agree
+
+The program never invents a house coordinate and never substitutes a different house number. If the street exists but the exact house point is absent, the mixed `All` view and the `Streets` view may return the matching street with an explicit street-level status. The `Houses` view remains empty because it is restricted to exact stored house records.
+
+A query containing a number and only a recognized place name is incomplete because no street phrase remains. The endpoint rejects that shape with `address query needs a street name` instead of treating the place name as a street.
+
+### 15.2 Result-Type Controls
+
+The GUI offers `All`, `Houses`, `Streets`, `Admin`, and `POIs` controls. `All` preserves the mixed ranking. A selected type restricts the final candidate set after the normal scoring rules have run, so each view keeps the same text and context checks while showing only the requested object class.
+
 Text normalization:
 
 - lowercase matching
@@ -536,6 +547,10 @@ Fuzzy search is bounded:
 
 Both features only expand to tokens already present in the local index. They do not invent new places.
 
+Direct, substring, and fuzzy posting references are merged and deduplicated before object scoring. The final ranker then verifies the match against the object's own fields. Exact matches rank above prefixes, prefixes above contained substrings, and valid fuzzy corrections below those stronger relationships. Important administrative places can therefore outrank incidental POI text when the corrected token is a stronger place-name match.
+
+Expansion is bounded by token length, edit distance, vocabulary seeds, and posting-list size. These limits prevent a short or common fragment from creating an unbounded Europe-wide candidate set.
+
 ## 17. Natural-Language Search With Ollama
 
 Natural-language search is exposed through:
@@ -545,15 +560,6 @@ Natural-language search is exposed through:
 ```
 
 The GUI uses this endpoint when the checkbox `Use LLM for natural-language query` is enabled.
-
-Examples:
-
-```text
-where can I find burger king in Stuttgart
-wo finde ich eine Apotheke in Karlsruhe
-where can I buy milk near me
-closest park to Koenigstrasse 1 Stuttgart
-```
 
 Ollama does not return final places. It only drafts structured intent JSON. The backend then validates the intent and searches the local PBF-derived indexes.
 
@@ -569,6 +575,12 @@ The Ollama flow:
 8. backend ranks real stored OSM objects
 
 If the query has an explicit place or address, that text is used as the origin. If the query has no explicit place, the frontend sends the current map center, and the backend can use it as a viewport origin.
+
+Named brands are handled generically. Ollama may identify a brand or named POI, but the backend accepts results only when the loaded snapshot contains matching `name`, `brand`, or selected `operator` text. Generic category words are kept as categories rather than being mistaken for brand names.
+
+Natural queries can also describe one category relative to another, such as a target product or service near a generic reference category. The reference category is resolved to real local POIs, bounded nearest anchors are selected, and target POIs are ranked by graph relevance, text relevance, distance to the closest anchor, explicit place context, and viewport context. The target remains the result; the reference POI only explains the spatial relationship.
+
+The GUI shows the model's one-sentence interpretation, the final Ollama JSON after two verification passes, the backend-accepted JSON, and the number of completed checks. This is a compact intent explanation, not hidden chain-of-thought. The backend JSON is the authoritative record of the search that was executed.
 
 ## 18. Local Knowledge Graph
 
@@ -591,17 +603,7 @@ Edge meanings:
 - category maps to OSM tags
 - place/origin limits or biases the search
 
-Example:
-
-```text
-query: where can I buy cough syrup near me
-concept: cough syrup
-graph target: pharmacy or chemist
-OSM tags: amenity=pharmacy, shop=chemist
-final results: real local OSM POIs matching those tags
-```
-
-The graph can say that a pharmacy or chemist is a likely search target for cough syrup. It cannot prove live shelf inventory. The program returns likely real OSM places, not guaranteed product stock.
+The graph can map a product concept to likely store categories and then to OSM tags. It cannot prove live shelf inventory. The program returns likely real OSM places, not guaranteed product stock.
 
 Brand handling is mostly generic. The backend searches indexed `name`, `brand`, and `operator` fields instead of maintaining a huge brand table. A small amount of deterministic cleanup is used for obvious variants such as `McDonalds`, `H&M`, and `C&A`.
 
@@ -627,6 +629,8 @@ For place queries, admin areas and direct POI/name matches are stronger than hou
 
 For natural product/service queries, the backend first chooses valid local POI candidates through the graph and then ranks by text, category, distance, and place context.
 
+For reference-category queries, distance to the closest accepted reference POI is part of the score. A typed place or address has priority over the current map view. The viewport is used when no usable explicit origin is present; it is a search context, not proof that every valid result must lie inside the visible rectangle.
+
 ## 20. Binary Snapshot Format
 
 The binary snapshot stores the reduced dataset and the embedded forward-geocoder index.
@@ -650,7 +654,7 @@ It includes:
 
 The snapshot is meant for the same platform and build style that created it. A snapshot written by the Ubuntu build should be loaded by the Ubuntu build.
 
-Older snapshots that do not contain admin ring metadata or the embedded forward index are rejected. Reparse the PBF and write a new snapshot.
+The loader requires the current snapshot schema, including admin ring metadata and the embedded forward index. A snapshot that does not satisfy that schema is rejected and must be recreated from the PBF.
 
 ## 21. Memory And Performance Design
 
@@ -683,6 +687,8 @@ Main visual layers:
 - purple/black highlighted markers: forward geocoder results
 - black marker and line: reverse geocoder result
 - dark green outlines: matched admin polygons
+- light-blue markers: reference POIs used by a natural relative search
+- blue dotted lines: straight visual links from each target result to its selected reference POI; these are not road routes
 
 Sidebar features:
 
@@ -692,6 +698,8 @@ Sidebar features:
 - LLM checkbox for natural-language mode
 - `Start Ollama Service` button
 - query time and result count
+- LLM interpretation, model JSON, backend JSON, and verification count in natural mode
+- `All`, `Houses`, `Streets`, `Admin`, and `POIs` result controls
 - ranked result list
 - reverse-geocoder click lookup toggle
 - clear reverse result button
@@ -699,6 +707,8 @@ Sidebar features:
 Viewport loading is bounded. The frontend requests houses, streets, and admin areas for the current map view instead of downloading the whole dataset at once.
 
 Admin geometry endpoints support `maxPoints=<n>` and simplified geometry responses, so large polygons do not freeze the browser.
+
+Clicking a ranked result does not rerun the query. It highlights the selected marker or street, moves the map to that result, and leaves the other ranked results visible for comparison.
 
 ## 23. HTTP API Endpoints
 
@@ -804,22 +814,26 @@ Important timings:
 - street connection
 - forward-index build
 - binary writing
-- total time
+- PBF extraction total
 
 Important memory lines:
 
-- compact dataset size
-- peak RSS
-- estimated forward-index memory
+- estimated dataset storage
+- PBF extraction peak RSS
+- estimated embedded forward-index storage
 
-`RSS` means resident set size, the part of the process that is actually resident in RAM.
+`RSS` means resident set size, the part of the process that is actually resident in RAM. The
+stored PBF extraction peak does not describe a later server run. The storage estimates add the
+capacities of the dataset and forward-index containers; they exclude allocator bookkeeping,
+the runtime spatial hash indexes, HTTP state, the operating-system page cache, and Ollama.
+Use the operating system's process RSS when measuring the complete live server.
 
 ## 27. GeoJSON Export
 
 Export a bounded sample for inspection:
 
 ```bash
-/path/to/osm-task1-build/osm_parser \
+/path/to/osm_project-build/osm_parser \
   --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
   --geojson /path/to/output/baden-sample.geojson
 ```
@@ -827,7 +841,7 @@ Export a bounded sample for inspection:
 Export with explicit limits:
 
 ```bash
-/path/to/osm-task1-build/osm_parser \
+/path/to/osm_project-build/osm_parser \
   --parse /path/to/data/baden-wuerttemberg-latest.osm.pbf \
   --geojson /path/to/output/baden-sample.geojson \
   --geojson-houses 10000 \
@@ -835,39 +849,15 @@ Export with explicit limits:
   --geojson-admin 300
 ```
 
-## 28. Included Reports
-
-The repository includes two PDF reports under `docs`.
-
-### 28.1 Program Explanation
+## 28. Program Manual
 
 ```text
 docs/osm_program_explained.pdf
 ```
 
-This report explains how the program works from PBF input to browser output. It covers houses, streets, administrative areas, POIs, reverse geocoding, forward geocoding, fuzzy search, Ollama natural-language search, the local knowledge graph, ranking, binary snapshots, memory design, and the GUI.
+This manual explains how the final program works from PBF input to browser output. It covers houses, streets, administrative areas, POIs, reverse geocoding, structured address resolution, substring and fuzzy search, Ollama natural-language search, the local knowledge graph, ranking, binary snapshots, memory design, and the GUI.
 
 Use it when you want a step-by-step explanation of the implementation.
-
-### 28.2 Sheet Task Audit
-
-```text
-docs/sheet_task_audit.pdf
-docs/sheet_task_audit.tex
-```
-
-This report checks Sheet 1, Sheet 2, and Sheet 3 task coverage. Each task section contains ten distinct probes or queries. The report records:
-
-- implementation status
-- query or check used
-- HTTP/frontend behavior observed
-- wall-clock time
-- server-reported time where available
-- pass, warning, or not-implemented verdict
-
-The audit was run against the Europe snapshot. Optional tasks that are not part of the final program are marked as not implemented instead of being counted as working features.
-
-The report also includes a browser recheck section. The browser automation layer blocked direct raw `/api/...` page navigation, so the browser confirmation was done through the real frontend controls: search box, LLM checkbox, type filters, and Search button.
 
 ## 29. Main Source Files
 
@@ -891,8 +881,6 @@ src/parser_parts/parser_flow.cpp       parser command flow and snapshot IO
 src/server.cpp                         HTTP API, reverse geocoder, natural search
 frontend/index.html                    Leaflet GUI
 docs/osm_program_explained.pdf         illustrated explanation
-docs/sheet_task_audit.pdf              sheet-task audit report
-docs/sheet_task_audit.tex              LaTeX source for the sheet-task audit report
 third_party/README.md                  bundled dependency notes
 ```
 
@@ -902,7 +890,7 @@ The parser part files are included by `src/parser.cpp`. This keeps one compiled 
 
 ### 30.1 `Binary snapshot has no embedded forward index`
 
-The binary snapshot was written by an older build. Reparse the PBF and save a new `.bin`.
+The file does not contain the current embedded forward-index schema. Reparse the PBF and save a new `.bin` with the current executable.
 
 ### 30.2 `Binary snapshot not found`
 
@@ -971,8 +959,8 @@ The local knowledge graph can map a product to likely OSM categories. It cannot 
 These commands use placeholder paths. Replace them with your local paths:
 
 ```text
-repository: /path/to/osm-task1
-build:      /path/to/osm-task1-build
+repository: /path/to/osm_project
+build:      /path/to/osm_project-build
 Europe PBF: /path/to/data/europe-latest.osm.pbf
 Europe bin: /path/to/output/europe-geocoder.bin
 model:      qwen2.5:3b
@@ -981,9 +969,9 @@ model:      qwen2.5:3b
 Build:
 
 ```bash
-cd /path/to/osm-task1
-cmake -S . -B /path/to/osm-task1-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build /path/to/osm-task1-build
+cd /path/to/osm_project
+cmake -S . -B /path/to/osm_project-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build /path/to/osm_project-build
 ```
 
 Install Ollama and model:
@@ -996,8 +984,8 @@ ollama pull qwen2.5:3b
 Parse Europe:
 
 ```bash
-cd /path/to/osm-task1
-/path/to/osm-task1-build/osm_parser \
+cd /path/to/osm_project
+/path/to/osm_project-build/osm_parser \
   --parse /path/to/data/europe-latest.osm.pbf \
   --low-memory \
   --connect-streets \
@@ -1008,11 +996,11 @@ cd /path/to/osm-task1
 Start the Europe GUI:
 
 ```bash
-cd /path/to/osm-task1
+cd /path/to/osm_project
 OSM_OLLAMA_MODEL=qwen2.5:3b \
 OSM_OLLAMA_HOST=127.0.0.1 \
 OSM_OLLAMA_TIMEOUT_SECONDS=30 \
-/path/to/osm-task1-build/osm_parser \
+/path/to/osm_project-build/osm_parser \
   --load-binary /path/to/output/europe-geocoder.bin \
   --server 8080
 ```

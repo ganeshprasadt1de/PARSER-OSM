@@ -86,7 +86,9 @@ std::string poiCategoryFromTags(const osmium::TagList& tags, std::string& tagKey
     if (amenity == "fast_food" || amenity == "restaurant" || amenity == "cafe" ||
         amenity == "bar" || amenity == "pub" || amenity == "fuel" ||
         amenity == "hospital" || amenity == "school" || amenity == "university" ||
-        amenity == "pharmacy" || amenity == "bank" || amenity == "parking") {
+        amenity == "pharmacy" || amenity == "bank" || amenity == "parking" ||
+        amenity == "atm" || amenity == "charging_station" || amenity == "dentist" ||
+        amenity == "post_office" || amenity == "toilets") {
         tagKeyOut = "amenity";
         tagValueOut = amenity;
         return amenity;
@@ -104,6 +106,13 @@ std::string poiCategoryFromTags(const osmium::TagList& tags, std::string& tagKey
         tagKeyOut = "tourism";
         tagValueOut = tourism;
         return tourism;
+    }
+
+    const std::string railway = getTagValue(tags, "railway");
+    if (railway == "station" || railway == "halt") {
+        tagKeyOut = "railway";
+        tagValueOut = railway;
+        return "railway_station";
     }
 
     const std::string leisure = getTagValue(tags, "leisure");

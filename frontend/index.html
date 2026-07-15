@@ -374,6 +374,8 @@
     let pipRequestId = 0;
     let viewportRequestId = 0;
     let viewportAbortController = null;
+    let geocodeRequestId = 0;
+    let geocodeAbortController = null;
     let geocodeResultEntries = [];
     let selectedGeocodeType = "";
 
@@ -938,7 +940,10 @@
       return JSON.stringify(value);
     }
 
-    async function drawGeocodeResult(data) {
+    async function drawGeocodeResult(data, requestId) {
+      if (requestId !== geocodeRequestId) {
+        return;
+      }
       geocodeLayer.clearLayers();
       geocodeResultEntries = [];
       const results = Array.isArray(data.results) ? data.results : [];
@@ -957,6 +962,9 @@
       }
       rows.push(["Query time", `${Number(data.queryTimeMs || 0).toFixed(3)} ms`]);
       rows.push(["Results", String(results.length)]);
+      if (data.addressPlanApplied && data.addressResolutionMessage) {
+        rows.push(["Address match", data.addressResolutionMessage, true]);
+      }
       if (data.resultTypeFilter && data.resultTypeFilter !== "all") {
         rows.push(["Type", data.resultTypeFilter]);
       }
@@ -1017,6 +1025,9 @@
           if (result.adminArea && Number.isInteger(Number(result.adminArea.index))) {
             fetchJson(`/api/admin-area?index=${Number(result.adminArea.index)}&maxPoints=1600`)
               .then((area) => {
+                if (requestId !== geocodeRequestId) {
+                  return;
+                }
                 if (!Array.isArray(area.geometry) || area.geometry.length < 4) {
                   return;
                 }
@@ -1077,6 +1088,12 @@
         clearGeocodeResult();
         return;
       }
+      const requestId = ++geocodeRequestId;
+      if (geocodeAbortController) {
+        geocodeAbortController.abort();
+      }
+      geocodeAbortController = new AbortController();
+      const requestOptions = { signal: geocodeAbortController.signal };
       setStatsRows(geocodeResultEl, [
         ["Query time", "loading"],
         ["Results", "-"]
@@ -1099,8 +1116,25 @@
         query.set("minLon", bounds.getWest().toFixed(8));
         query.set("maxLon", bounds.getEast().toFixed(8));
       }
-      const data = await fetchJson(`${endpoint}?${query.toString()}`);
-      await drawGeocodeResult(data);
+      try {
+        const data = await fetchJson(`${endpoint}?${query.toString()}`, requestOptions);
+        if (requestId !== geocodeRequestId) {
+          return;
+        }
+        await drawGeocodeResult(data, requestId);
+      } catch (error) {
+        if (error.name === "AbortError" || requestId !== geocodeRequestId) {
+          return;
+        }
+        setStatsRows(geocodeResultEl, [
+          ["Query time", "-"],
+          ["Results", `Request failed: ${error.message}`, true]
+        ]);
+      } finally {
+        if (requestId === geocodeRequestId) {
+          geocodeAbortController = null;
+        }
+      }
     }
 
     async function startOllamaService() {
@@ -1120,6 +1154,11 @@
     }
 
     function clearGeocodeResult() {
+      ++geocodeRequestId;
+      if (geocodeAbortController) {
+        geocodeAbortController.abort();
+        geocodeAbortController = null;
+      }
       geocodeLayer.clearLayers();
       setStatsRows(geocodeResultEl, [
         ["Query time", "-"],
@@ -1274,12 +1313,7 @@
       }
     });
     geocodeBtn.addEventListener("click", () => {
-      geocodeSearch().catch((error) => {
-        setStatsRows(geocodeResultEl, [
-          ["Query time", "-"],
-          ["Results", `Request failed: ${error.message}`, true]
-        ]);
-      });
+      geocodeSearch();
     });
     geocodeInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
