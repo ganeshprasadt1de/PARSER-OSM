@@ -9,7 +9,7 @@ The program does not use Google, Nominatim, Overpass, PostGIS, SQLite, or an onl
 The illustrated project explanation is included here:
 
 ```text
-docs/osm_program_explained.pdf
+docs/osm_program_manual.pdf
 ```
 
 That PDF explains the parser, reduced data model, reverse geocoder, forward geocoder, local knowledge graph, Ollama mode, ranking, API, GUI, binary snapshot format, and memory layout with diagrams.
@@ -852,7 +852,7 @@ Export with explicit limits:
 ## 28. Program Manual
 
 ```text
-docs/osm_program_explained.pdf
+docs/osm_program_manual.pdf
 ```
 
 This manual explains how the final program works from PBF input to browser output. It covers houses, streets, administrative areas, POIs, reverse geocoding, structured address resolution, substring and fuzzy search, Ollama natural-language search, the local knowledge graph, ranking, binary snapshots, memory design, and the GUI.
@@ -880,7 +880,7 @@ src/parser_parts/street_merge.cpp      street connection
 src/parser_parts/parser_flow.cpp       parser command flow and snapshot IO
 src/server.cpp                         HTTP API, reverse geocoder, natural search
 frontend/index.html                    Leaflet GUI
-docs/osm_program_explained.pdf         illustrated explanation
+docs/osm_program_manual.pdf            illustrated explanation
 third_party/README.md                  bundled dependency notes
 ```
 
